@@ -1,4 +1,4 @@
-// Copyright 2018 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,8 +22,8 @@ import (
 
 	"go.opencensus.io/stats/view"
 
-	authn "istio.io/api/authentication/v1alpha1"
 	"istio.io/api/security/v1beta1"
+
 	"istio.io/istio/pilot/pkg/model/test"
 )
 
@@ -70,109 +70,6 @@ func TestResolveJwksURIUsingOpenID(t *testing.T) {
 	// Verify mock openID discovery http://localhost:9999/.well-known/openid-configuration was only called once because of the cache.
 	if got, want := ms.OpenIDHitNum, uint64(1); got != want {
 		t.Errorf("Mock OpenID discovery Hit number => expected %d but got %d", want, got)
-	}
-}
-
-func TestSetAuthenticationPolicyJwksURIs(t *testing.T) {
-	r := NewJwksResolver(JwtPubKeyEvictionDuration, JwtPubKeyRefreshInterval)
-
-	ms, err := test.StartNewServer()
-	defer ms.Stop()
-	if err != nil {
-		t.Fatal("failed to start a mock server")
-	}
-
-	mockCertURL := ms.URL + "/oauth2/v3/certs"
-
-	authNPolicies := map[string]*authn.Policy{
-		"one": {
-			Targets: []*authn.TargetSelector{{
-				Name: "one",
-				Ports: []*authn.PortSelector{
-					{
-						Port: &authn.PortSelector_Number{
-							Number: 80,
-						},
-					},
-				},
-			}},
-			Origins: []*authn.OriginAuthenticationMethod{
-				{
-					Jwt: &authn.Jwt{
-						Issuer: ms.URL,
-					},
-				},
-			},
-			PrincipalBinding: authn.PrincipalBinding_USE_ORIGIN,
-		},
-		"two": {
-			Targets: []*authn.TargetSelector{{
-				Name: "two",
-				Ports: []*authn.PortSelector{
-					{
-						Port: &authn.PortSelector_Number{
-							Number: 80,
-						},
-					},
-				},
-			}},
-			Origins: []*authn.OriginAuthenticationMethod{
-				{
-					Jwt: &authn.Jwt{
-						Issuer:  "http://abc",
-						JwksUri: "http://xyz",
-					},
-				},
-			},
-			PrincipalBinding: authn.PrincipalBinding_USE_ORIGIN,
-		},
-		"jwks": {
-			Targets: []*authn.TargetSelector{{
-				Name: "two",
-				Ports: []*authn.PortSelector{
-					{
-						Port: &authn.PortSelector_Number{
-							Number: 80,
-						},
-					},
-				},
-			}},
-			Origins: []*authn.OriginAuthenticationMethod{
-				{
-					Jwt: &authn.Jwt{
-						Issuer: "http://abc",
-						Jwks:   "JSONWebKeySet",
-					},
-				},
-			},
-			PrincipalBinding: authn.PrincipalBinding_USE_ORIGIN,
-		},
-	}
-
-	cases := []struct {
-		in       *authn.Policy
-		expected string
-	}{
-		{
-			in:       authNPolicies["one"],
-			expected: mockCertURL,
-		},
-		{
-			in:       authNPolicies["two"],
-			expected: "http://xyz",
-		},
-		{
-			in:       authNPolicies["jwks"],
-			expected: "",
-		},
-	}
-	for _, c := range cases {
-		_ = r.SetAuthenticationPolicyJwksURIs(c.in)
-		// nolint: staticcheck
-		got := c.in.GetOrigins()[0].GetJwt().JwksUri
-		if want := c.expected; got != want {
-			t.Errorf("setAuthenticationPolicyJwksURIs(%+v): expected (%s), got (%s)", c.in, c.expected, c.in)
-		}
 	}
 }
 
@@ -314,6 +211,49 @@ func TestGetPublicKey(t *testing.T) {
 	// Verify mock server http://localhost:9999/oauth2/v3/certs was only called once because of the cache.
 	if got, want := ms.PubKeyHitNum, uint64(1); got != want {
 		t.Errorf("Mock server Hit number => expected %d but got %d", want, got)
+	}
+}
+
+func TestGetPublicKeyReorderedKey(t *testing.T) {
+	r := NewJwksResolver(JwtPubKeyEvictionDuration, time.Millisecond*20)
+	defer r.Close()
+
+	ms, err := test.StartNewServer()
+	defer ms.Stop()
+	if err != nil {
+		t.Fatal("failed to start a mock server")
+	}
+	ms.ReturnReorderedKeyAfterFirstNumHits = 1
+
+	mockCertURL := ms.URL + "/oauth2/v3/certs"
+
+	cases := []struct {
+		in                string
+		expectedJwtPubkey string
+	}{
+		{
+			in:                mockCertURL,
+			expectedJwtPubkey: test.JwtPubKey1,
+		},
+		{
+			in:                mockCertURL, // Send two same request, mock server is expected to hit only once because of the cache.
+			expectedJwtPubkey: test.JwtPubKey1Reordered,
+		},
+	}
+	for _, c := range cases {
+		pk, err := r.GetPublicKey(c.in)
+		if err != nil {
+			t.Errorf("GetPublicKey(%+v) fails: expected no error, got (%v)", c.in, err)
+		}
+		if c.expectedJwtPubkey != pk {
+			t.Errorf("GetPublicKey(%+v): expected (%s), got (%s)", c.in, c.expectedJwtPubkey, pk)
+		}
+		r.refresh()
+	}
+
+	// Verify mock server http://localhost:9999/oauth2/v3/certs was only called once because of the cache.
+	if got, want := r.refreshJobKeyChangedCount, uint64(0); got != want {
+		t.Errorf("JWKs Resolver Refreshed Key Count => expected %d but got %d", want, got)
 	}
 }
 
@@ -599,5 +539,47 @@ func verifyKeyLastRefreshedTime(t *testing.T, r *JwksResolver, ms *test.MockOpen
 
 	if actualChanged := oldRefreshedTime != newRefreshedTime; actualChanged != wantChanged {
 		t.Errorf("Want changed: %t but got %t", wantChanged, actualChanged)
+	}
+}
+
+func TestCompareJWKSResponse(t *testing.T) {
+	type args struct {
+		oldKeyString string
+		newKeyString string
+	}
+	tests := []struct {
+		name    string
+		args    args
+		want    bool
+		wantErr bool
+	}{
+		{"testEquivalentStrings", args{test.JwtPubKey1, test.JwtPubKey1}, false, false},
+		{"testReorderedKeys", args{test.JwtPubKey1, test.JwtPubKey1Reordered}, false, false},
+		{"testDifferentKeys", args{test.JwtPubKey1, test.JwtPubKey2}, true, false},
+		{"testOldJsonParseFailure", args{"This is not JSON", test.JwtPubKey1}, true, false},
+		{"testNewJsonParseFailure", args{test.JwtPubKey1, "This is not JSON"}, false, true},
+		{"testNewNoKid", args{test.JwtPubKey1, test.JwtPubKeyNoKid}, true, false},
+		{"testOldNoKid", args{test.JwtPubKeyNoKid, test.JwtPubKey1}, true, false},
+		{"testBothNoKidSame", args{test.JwtPubKeyNoKid, test.JwtPubKeyNoKid}, false, false},
+		{"testBothNoKidDifferent", args{test.JwtPubKeyNoKid, test.JwtPubKeyNoKid2}, true, false},
+		{"testNewNoKeys", args{test.JwtPubKey1, test.JwtPubKeyNoKeys}, true, false},
+		{"testOldNoKeys", args{test.JwtPubKeyNoKeys, test.JwtPubKey1}, true, false},
+		{"testBothNoKeysSame", args{test.JwtPubKeyNoKeys, test.JwtPubKeyNoKeys}, false, false},
+		{"testBothNoKeysDifferent", args{test.JwtPubKeyNoKeys, test.JwtPubKeyNoKeys2}, true, false},
+		{"testNewExtraElements", args{test.JwtPubKey1, test.JwtPubKeyExtraElements}, true, false},
+		{"testOldExtraElements", args{test.JwtPubKeyExtraElements, test.JwtPubKey1}, true, false},
+		{"testBothExtraElements", args{test.JwtPubKeyExtraElements, test.JwtPubKeyExtraElements}, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := compareJWKSResponse(tt.args.oldKeyString, tt.args.newKeyString)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("compareJWKSResponse() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if got != tt.want {
+				t.Errorf("compareJWKSResponse() got = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

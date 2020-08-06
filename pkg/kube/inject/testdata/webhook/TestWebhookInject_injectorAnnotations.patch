@@ -48,6 +48,13 @@
   },
   {
     "op": "add",
+    "path": "/spec/securityContext",
+    "value": {
+      "fsGroup": 1337
+    }
+  },
+  {
+    "op": "add",
     "path": "/metadata/annotations",
     "value": {
       "bar": "baz"
@@ -57,6 +64,21 @@
     "op": "add",
     "path": "/metadata/annotations/foo",
     "value": "bar"
+  },
+  {
+    "op": "add",
+    "path": "/metadata/annotations/prometheus.io~1path",
+    "value": "/stats/prometheus"
+  },
+  {
+    "op": "add",
+    "path": "/metadata/annotations/prometheus.io~1port",
+    "value": "15020"
+  },
+  {
+    "op": "add",
+    "path": "/metadata/annotations/prometheus.io~1scrape",
+    "value": "true"
   },
   {
     "op": "add",

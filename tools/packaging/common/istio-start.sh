@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Copyright 2017 Istio Authors. All Rights Reserved.
+# Copyright Istio Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,8 +21,9 @@
 set -e
 
 # Match pilot/docker/Dockerfile.proxyv2
-export ISTIO_META_ISTIO_VERSION="1.6.0"
+export ISTIO_META_ISTIO_VERSION="1.8.0"
 
+set -a
 # Load optional config variables
 ISTIO_SIDECAR_CONFIG=${ISTIO_SIDECAR_CONFIG:-/var/lib/istio/envoy/sidecar.env}
 if [[ -r ${ISTIO_SIDECAR_CONFIG} ]]; then
@@ -35,9 +36,8 @@ ISTIO_CLUSTER_CONFIG=${ISTIO_CLUSTER_CONFIG:-/var/lib/istio/envoy/cluster.env}
 if [[ -r ${ISTIO_CLUSTER_CONFIG} ]]; then
   # shellcheck disable=SC1090
   . "$ISTIO_CLUSTER_CONFIG"
-  # Make sure the documented configuration variables are exported
-  export ISTIO_CP_AUTH ISTIO_SERVICE_CIDR ISTIO_INBOUND_PORTS
 fi
+set +a
 
 # Set defaults
 ISTIO_BIN_BASE=${ISTIO_BIN_BASE:-/usr/local/bin}
@@ -96,6 +96,8 @@ if [ -z "${PILOT_ADDRESS:-}" ]; then
 fi
 
 CA_ADDR=${CA_ADDR:-${PILOT_ADDRESS}}
+PROV_CERT=${PROV_CERT-/etc/certs}
+OUTPUT_CERTS=${OUTPUT_CERTS-/etc/certs}
 
 export PROV_CERT
 export OUTPUT_CERTS
@@ -106,11 +108,10 @@ ISTIO_AGENT_FLAGS=${ISTIO_AGENT_FLAGS:-}
 # Split ISTIO_AGENT_FLAGS by spaces.
 IFS=' ' read -r -a ISTIO_AGENT_FLAGS_ARRAY <<< "$ISTIO_AGENT_FLAGS"
 
-export MESH_CONFIG=${MESH_CONFIG:-"
-defaultConfig:
-  serviceCluster: $SVC
-  controlPlaneAuthPolicy: ${CONTROL_PLANE_AUTH_POLICY}
-  discoveryAddress: ${PILOT_ADDRESS}
+export PROXY_CONFIG=${PROXY_CONFIG:-"
+serviceCluster: $SVC
+controlPlaneAuthPolicy: ${CONTROL_PLANE_AUTH_POLICY}
+discoveryAddress: ${PILOT_ADDRESS}
 "}
 
 if [ ${EXEC_USER} == "${USER:-}" ] ; then

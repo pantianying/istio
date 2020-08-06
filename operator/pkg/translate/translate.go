@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,7 +17,6 @@ package translate
 
 import (
 	"fmt"
-	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -28,12 +27,13 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 
 	"istio.io/api/operator/v1alpha1"
+	iopv1alpha1 "istio.io/istio/operator/pkg/apis/istio/v1alpha1"
 	"istio.io/istio/operator/pkg/name"
 	"istio.io/istio/operator/pkg/object"
 	"istio.io/istio/operator/pkg/tpath"
 	"istio.io/istio/operator/pkg/util"
 	"istio.io/istio/operator/pkg/version"
-	"istio.io/istio/operator/pkg/vfs"
+	oversion "istio.io/istio/operator/version"
 	"istio.io/pkg/log"
 )
 
@@ -46,11 +46,6 @@ const (
 	HelmValuesHubSubpath = "hub"
 	// HelmValuesTagSubpath is the subpath from the component root to the tag parameter.
 	HelmValuesTagSubpath = "tag"
-	// TranslateConfigFolder is the folder where we store translation configurations
-	TranslateConfigFolder = "translateConfig"
-	// TranslateConfigPrefix is the prefix of IstioOperator's translation configuration file
-	TranslateConfigPrefix = "translateConfig-"
-
 	// devDbg generates lots of output useful in development.
 	devDbg = false
 )
@@ -73,12 +68,6 @@ type Translator struct {
 	GlobalNamespaces map[name.ComponentName]string `yaml:"globalNamespaces"`
 	// ComponentMaps is a set of mappings for each Istio component.
 	ComponentMaps map[name.ComponentName]*ComponentMaps `yaml:"componentMaps"`
-}
-
-// FeatureMap is a set of mappings for an Istio feature.
-type FeatureMap struct {
-	// Components contains list of components that belongs to the current feature.
-	Components []name.ComponentName
 }
 
 // ComponentMaps is a set of mappings for an Istio component.
@@ -108,19 +97,86 @@ type Translation struct {
 }
 
 // NewTranslator creates a new translator for minorVersion and returns a ptr to it.
-func NewTranslator(minorVersion version.MinorVersion) (*Translator, error) {
-	f := filepath.Join(TranslateConfigFolder, TranslateConfigPrefix+minorVersion.String()+".yaml")
-	b, err := vfs.ReadFile(f)
-	if err != nil {
-		return nil, fmt.Errorf("could not read translateConfig file %s: %s", f, err)
+func NewTranslator() *Translator {
+	t := &Translator{
+		Version: oversion.OperatorBinaryVersion.MinorVersion,
+		APIMapping: map[string]*Translation{
+			"Hub":         {OutPath: "global.hub"},
+			"Tag":         {OutPath: "global.tag"},
+			"K8SDefaults": {OutPath: "global.resources"},
+			"Revision":    {OutPath: "revision"},
+			"MeshConfig":  {OutPath: "meshConfig"},
+		},
+		GlobalNamespaces: map[name.ComponentName]string{
+			name.PilotComponentName: "istioNamespace",
+		},
+		ComponentMaps: map[name.ComponentName]*ComponentMaps{
+			name.IstioBaseComponentName: {
+				HelmSubdir:           "base",
+				ToHelmValuesTreeRoot: "global",
+				SkipReverseTranslate: true,
+			},
+			name.PilotComponentName: {
+				ResourceType:         "Deployment",
+				ResourceName:         "istiod",
+				ContainerName:        "discovery",
+				HelmSubdir:           "istio-control/istio-discovery",
+				ToHelmValuesTreeRoot: "pilot",
+			},
+			name.IngressComponentName: {
+				ResourceType:         "Deployment",
+				ResourceName:         "istio-ingressgateway",
+				ContainerName:        "istio-proxy",
+				HelmSubdir:           "gateways/istio-ingress",
+				ToHelmValuesTreeRoot: "gateways.istio-ingressgateway",
+			},
+			name.EgressComponentName: {
+				ResourceType:         "Deployment",
+				ResourceName:         "istio-egressgateway",
+				ContainerName:        "istio-proxy",
+				HelmSubdir:           "gateways/istio-egress",
+				ToHelmValuesTreeRoot: "gateways.istio-egressgateway",
+			},
+			name.CNIComponentName: {
+				ResourceType:         "DaemonSet",
+				ResourceName:         "istio-cni-node",
+				ContainerName:        "install-cni",
+				HelmSubdir:           "istio-cni",
+				ToHelmValuesTreeRoot: "cni",
+			},
+			name.IstiodRemoteComponentName: {
+				HelmSubdir:           "istiod-remote",
+				ToHelmValuesTreeRoot: "global",
+				SkipReverseTranslate: true,
+			},
+			name.ComponentName("Istiocoredns"): {
+				ResourceType:         "Deployment",
+				ResourceName:         "istiocoredns",
+				ContainerName:        "coredns",
+				HelmSubdir:           "istiocoredns",
+				ToHelmValuesTreeRoot: "istiocoredns",
+			},
+		},
+		// nolint: lll
+		KubernetesMapping: map[string]*Translation{
+			"Components.{{.ComponentName}}.K8S.Affinity":            {OutPath: "[{{.ResourceType}}:{{.ResourceName}}].spec.template.spec.affinity"},
+			"Components.{{.ComponentName}}.K8S.Env":                 {OutPath: "[{{.ResourceType}}:{{.ResourceName}}].spec.template.spec.containers.[name:{{.ContainerName}}].env"},
+			"Components.{{.ComponentName}}.K8S.HpaSpec":             {OutPath: "[HorizontalPodAutoscaler:{{.ResourceName}}].spec"},
+			"Components.{{.ComponentName}}.K8S.ImagePullPolicy":     {OutPath: "[{{.ResourceType}}:{{.ResourceName}}].spec.template.spec.containers.[name:{{.ContainerName}}].imagePullPolicy"},
+			"Components.{{.ComponentName}}.K8S.NodeSelector":        {OutPath: "[{{.ResourceType}}:{{.ResourceName}}].spec.template.spec.nodeSelector"},
+			"Components.{{.ComponentName}}.K8S.PodDisruptionBudget": {OutPath: "[PodDisruptionBudget:{{.ResourceName}}].spec"},
+			"Components.{{.ComponentName}}.K8S.PodAnnotations":      {OutPath: "[{{.ResourceType}}:{{.ResourceName}}].spec.template.metadata.annotations"},
+			"Components.{{.ComponentName}}.K8S.PriorityClassName":   {OutPath: "[{{.ResourceType}}:{{.ResourceName}}].spec.template.spec.priorityClassName."},
+			"Components.{{.ComponentName}}.K8S.ReadinessProbe":      {OutPath: "[{{.ResourceType}}:{{.ResourceName}}].spec.template.spec.containers.[name:{{.ContainerName}}].readinessProbe"},
+			"Components.{{.ComponentName}}.K8S.ReplicaCount":        {OutPath: "[{{.ResourceType}}:{{.ResourceName}}].spec.replicas"},
+			"Components.{{.ComponentName}}.K8S.Resources":           {OutPath: "[{{.ResourceType}}:{{.ResourceName}}].spec.template.spec.containers.[name:{{.ContainerName}}].resources"},
+			"Components.{{.ComponentName}}.K8S.Strategy":            {OutPath: "[{{.ResourceType}}:{{.ResourceName}}].spec.strategy"},
+			"Components.{{.ComponentName}}.K8S.Tolerations":         {OutPath: "[{{.ResourceType}}:{{.ResourceName}}].spec.template.spec.tolerations"},
+			"Components.{{.ComponentName}}.K8S.ServiceAnnotations":  {OutPath: "[Service:{{.ResourceName}}].metadata.annotations"},
+			"Components.{{.ComponentName}}.K8S.Service":             {OutPath: "[Service:{{.ResourceName}}].spec"},
+		},
 	}
-	t := &Translator{}
-	err = yaml.Unmarshal(b, t)
-	if err != nil {
-		return nil, fmt.Errorf("could not Unmarshal translateConfig file %s: %s", f, err)
-	}
-	t.Version = minorVersion
-	return t, nil
+	return t
 }
 
 // OverlayK8sSettings overlays k8s settings from iop over the manifest objects, based on t's translation mappings.
@@ -161,6 +217,9 @@ func (t *Translator) OverlayK8sSettings(yml string, iop *v1alpha1.IstioOperatorS
 		if mint, ok := util.ToIntValue(m); ok && mint == 0 {
 			scope.Debugf("path %s is int 0, skip mapping.", inPath)
 			continue
+		}
+		if componentName == name.IstioBaseComponentName {
+			return "", fmt.Errorf("base component can only have k8s.overlays, not other K8s settings")
 		}
 		outPath, err := t.renderResourceComponentPathTemplate(v.OutPath, componentName, resourceName, addonName, iop.Revision)
 		if err != nil {
@@ -222,8 +281,7 @@ func (t *Translator) ProtoToValues(ii *v1alpha1.IstioOperatorSpec) (string, erro
 }
 
 // TranslateHelmValues creates a Helm values.yaml config data tree from iop using the given translator.
-func (t *Translator) TranslateHelmValues(iop *v1alpha1.IstioOperatorSpec, k8s *v1alpha1.KubernetesResourcesSpec,
-	componentName name.ComponentName, resourceName string) (string, error) {
+func (t *Translator) TranslateHelmValues(iop *v1alpha1.IstioOperatorSpec, componentsSpec interface{}, componentName name.ComponentName) (string, error) {
 	globalVals, globalUnvalidatedVals, apiVals := make(map[string]interface{}), make(map[string]interface{}), make(map[string]interface{})
 
 	// First, translate the IstioOperator API to helm Values.
@@ -267,7 +325,7 @@ func (t *Translator) TranslateHelmValues(iop *v1alpha1.IstioOperatorSpec, k8s *v
 		return "", err
 	}
 
-	mergedYAML, err = applyGatewayTranslations(mergedYAML, componentName, resourceName, k8s)
+	mergedYAML, err = applyGatewayTranslations(mergedYAML, componentName, componentsSpec)
 	if err != nil {
 		return "", err
 	}
@@ -277,7 +335,7 @@ func (t *Translator) TranslateHelmValues(iop *v1alpha1.IstioOperatorSpec, k8s *v
 
 // applyGatewayTranslations writes gateway name gwName at the appropriate values path in iop and maps k8s.service.ports
 // to values. It returns the resulting YAML tree.
-func applyGatewayTranslations(iop []byte, componentName name.ComponentName, gwName string, k8s *v1alpha1.KubernetesResourcesSpec) ([]byte, error) {
+func applyGatewayTranslations(iop []byte, componentName name.ComponentName, componentSpec interface{}) ([]byte, error) {
 	if !componentName.IsGateway() {
 		return iop, nil
 	}
@@ -285,14 +343,22 @@ func applyGatewayTranslations(iop []byte, componentName name.ComponentName, gwNa
 	if err := yaml.Unmarshal(iop, &iopt); err != nil {
 		return nil, err
 	}
+	gwSpec := componentSpec.(*v1alpha1.GatewaySpec)
+	k8s := gwSpec.K8S
 	switch componentName {
 	case name.IngressComponentName:
-		setYAMLNodeByMapPath(iopt, util.PathFromString("gateways.istio-ingressgateway.name"), gwName)
+		setYAMLNodeByMapPath(iopt, util.PathFromString("gateways.istio-ingressgateway.name"), gwSpec.Name)
+		if len(gwSpec.Label) != 0 {
+			setYAMLNodeByMapPath(iopt, util.PathFromString("gateways.istio-ingressgateway.labels"), gwSpec.Label)
+		}
 		if k8s != nil && k8s.Service != nil {
 			setYAMLNodeByMapPath(iopt, util.PathFromString("gateways.istio-ingressgateway.ports"), k8s.Service.Ports)
 		}
 	case name.EgressComponentName:
-		setYAMLNodeByMapPath(iopt, util.PathFromString("gateways.istio-egressgateway.name"), gwName)
+		setYAMLNodeByMapPath(iopt, util.PathFromString("gateways.istio-egressgateway.name"), gwSpec.Name)
+		if len(gwSpec.Label) != 0 {
+			setYAMLNodeByMapPath(iopt, util.PathFromString("gateways.istio-egressgateway.labels"), gwSpec.Label)
+		}
 		if k8s != nil && k8s.Service != nil {
 			setYAMLNodeByMapPath(iopt, util.PathFromString("gateways.istio-egressgateway.ports"), k8s.Service.Ports)
 		}
@@ -722,7 +788,20 @@ func createPatchObjectFromPath(node interface{}, path util.Path) (map[string]int
 }
 
 // IOPStoIOP takes an IstioOperatorSpec and returns a corresponding IstioOperator with the given name and namespace.
-func IOPStoIOP(iops proto.Message, name, namespace string) (string, error) {
+func IOPStoIOP(iops proto.Message, name, namespace string) (*iopv1alpha1.IstioOperator, error) {
+	iopStr, err := IOPStoIOPstr(iops, name, namespace)
+	if err != nil {
+		return nil, err
+	}
+	iop := &iopv1alpha1.IstioOperator{}
+	if err := util.UnmarshalWithJSONPB(iopStr, iop, false); err != nil {
+		return nil, err
+	}
+	return iop, nil
+}
+
+// IOPStoIOPstr takes an IstioOperatorSpec and returns a corresponding IstioOperator string with the given name and namespace.
+func IOPStoIOPstr(iops proto.Message, name, namespace string) (string, error) {
 	iopsStr, err := util.MarshalWithJSONPB(iops)
 	if err != nil {
 		return "", err

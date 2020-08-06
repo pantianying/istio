@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -43,6 +43,7 @@ const (
 	enableCoreDumpContainerName = "enable-core-dump"
 	envoyVolumeName             = "istio-envoy"
 	initContainerName           = "istio-init"
+	initValidationContainerName = "istio-validation"
 	jwtTokenVolumeName          = "istio-token"
 	proxyContainerName          = "istio-proxy"
 	sidecarAnnotationPrefix     = "sidecar.istio.io"
@@ -247,6 +248,7 @@ func extractObject(in runtime.Object) (interface{}, error) {
 	}
 
 	podSpec.InitContainers = removeInjectedContainers(podSpec.InitContainers, initContainerName)
+	podSpec.InitContainers = removeInjectedContainers(podSpec.InitContainers, initValidationContainerName)
 	podSpec.InitContainers = removeInjectedContainers(podSpec.InitContainers, enableCoreDumpContainerName)
 	podSpec.Containers = removeInjectedContainers(podSpec.Containers, proxyContainerName)
 	podSpec.Volumes = removeInjectedVolumes(podSpec.Volumes, envoyVolumeName)

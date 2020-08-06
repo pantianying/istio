@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Copyright 2019 Istio Authors
+# Copyright Istio Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -26,11 +26,9 @@ SCRIPTPATH="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 ROOTDIR="${SCRIPTPATH}/../.."
 
 MANIFESTS_DIR="${ROOTDIR}/manifests"
-PROFILES_DIR="${ROOTDIR}/operator/data/profiles"
 CHARTS_SNAPSHOT="${ROOTDIR}/operator/cmd/mesh/testdata/manifest-generate/data-snapshot"
 
-cp -Rf "${MANIFESTS_DIR}"/* "${CHARTS_SNAPSHOT}"/charts/.
-cp -Rf "${PROFILES_DIR}"/* "${CHARTS_SNAPSHOT}"/profiles/.
+# Clean up existing files
+rm -Rf "${CHARTS_SNAPSHOT:?}/"
 
-# We don't need any binaries, just the Helm charts.
-rm -Rf "${CHARTS_SNAPSHOT}/charts/bin"
+cp -Rf "${MANIFESTS_DIR}" "${CHARTS_SNAPSHOT}"/

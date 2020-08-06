@@ -1,4 +1,4 @@
-// Copyright 2018 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,11 +26,11 @@ import (
 	"google.golang.org/grpc/codes"
 	ghc "google.golang.org/grpc/health/grpc_health_v1"
 
+	pb "istio.io/api/security/v1alpha1"
 	"istio.io/istio/pkg/mcp/status"
 	"istio.io/istio/pkg/spiffe"
 	caerror "istio.io/istio/security/pkg/pki/error"
 	"istio.io/istio/security/pkg/pki/util"
-	pb "istio.io/istio/security/proto"
 	"istio.io/pkg/log"
 )
 
@@ -98,9 +98,9 @@ func (s *CAServer) start(port int) error {
 	port = listener.Addr().(*net.TCPAddr).Port
 	s.URL = fmt.Sprintf("localhost:%d", port)
 	go func() {
-		log.Infof("start CA server on %s", s.URL)
+		caServerLog.Infof("start CA server on %s", s.URL)
 		if err := s.GRPCServer.Serve(listener); err != nil {
-			log.Errorf("CA Server failed to serve in %q: %v", s.URL, err)
+			caServerLog.Errorf("CA Server failed to serve in %q: %v", s.URL, err)
 		}
 	}()
 	return nil
@@ -143,6 +143,7 @@ func (s *CAServer) sendEmpty() bool {
 // CreateCertificate handles CSR.
 func (s *CAServer) CreateCertificate(ctx context.Context, request *pb.IstioCertificateRequest) (
 	*pb.IstioCertificateResponse, error) {
+	caServerLog.Infof("received CSR request")
 	if s.shouldReject() {
 		caServerLog.Info("force rejecting CSR request")
 		return nil, status.Error(codes.Unavailable, "CA server is not available")

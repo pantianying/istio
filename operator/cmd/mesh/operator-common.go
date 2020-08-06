@@ -1,4 +1,4 @@
-// Copyright 2019 Istio Authors
+// Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,8 +15,14 @@
 package mesh
 
 import (
+	"context"
+
+	v12 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	_ "k8s.io/client-go/plugin/pkg/client/auth" // Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
+
 	"istio.io/istio/operator/pkg/helm"
-	"istio.io/istio/operator/pkg/manifest"
+	"istio.io/istio/operator/pkg/name"
 	"istio.io/istio/operator/pkg/util"
 )
 
@@ -27,21 +33,35 @@ type operatorCommonArgs struct {
 	tag string
 	// operatorNamespace is the namespace the operator controller is installed into.
 	operatorNamespace string
-	// istioNamespace is the namespace Istio is installed into.
+	// watchedNamespaces is the namespaces the operator controller watches, could be namespace list separated by comma.
+	watchedNamespaces string
+	// istioNamespace is deprecated, use watchedNamespaces instead.
 	istioNamespace string
+	// manifestsPath is a path to a charts and profiles directory in the local filesystem, or URL with a release tgz.
+	manifestsPath string
+	// revision is the Istio control plane revision the command targets.
+	revision string
 }
 
 const (
-	operatorResourceName = "istio-operator"
+	operatorResourceName     = "istio-operator"
+	operatorDefaultNamespace = "istio-operator"
+	istioDefaultNamespace    = "istio-system"
 )
 
-func isControllerInstalled(kubeconfig, context, operatorNamespace string) (bool, error) {
-	return manifest.DeploymentExists(kubeconfig, context, operatorNamespace, operatorResourceName)
+// isControllerInstalled reports whether an operator deployment exists in the given namespace.
+func isControllerInstalled(cs kubernetes.Interface, operatorNamespace string, revision string) (bool, error) {
+	orn := operatorResourceName
+	if revision != "" {
+		orn += "-" + revision
+	}
+	return deploymentExists(cs, operatorNamespace, orn)
 }
 
-// chartsRootDir, helmBaseDir, componentName, namespace string) (Template, TemplateRenderer, error) {
-func renderOperatorManifest(_ *rootArgs, ocArgs *operatorCommonArgs, _ *Logger) (string, string, error) {
-	r, err := helm.NewHelmRenderer(snapshotInstallPackageDir, "istio-operator", istioControllerComponentName, ocArgs.operatorNamespace)
+// renderOperatorManifest renders a manifest to install the operator with the given input arguments.
+func renderOperatorManifest(_ *rootArgs, ocArgs *operatorCommonArgs) (string, string, error) {
+	installPackagePath := ocArgs.manifestsPath
+	r, err := helm.NewHelmRenderer(installPackagePath, "istio-operator", string(name.IstioOperatorComponentName), ocArgs.operatorNamespace)
 	if err != nil {
 		return "", "", err
 	}
@@ -53,20 +73,26 @@ func renderOperatorManifest(_ *rootArgs, ocArgs *operatorCommonArgs, _ *Logger) 
 	tmpl := `
 operatorNamespace: {{.OperatorNamespace}}
 istioNamespace: {{.IstioNamespace}}
+watchedNamespaces: {{.WatchedNamespaces}}
 hub: {{.Hub}}
 tag: {{.Tag}}
+revision: {{if .Revision }} {{.Revision}} {{else}} "" {{end}}
 `
 
 	tv := struct {
 		OperatorNamespace string
 		IstioNamespace    string
+		WatchedNamespaces string
 		Hub               string
 		Tag               string
+		Revision          string
 	}{
 		OperatorNamespace: ocArgs.operatorNamespace,
 		IstioNamespace:    ocArgs.istioNamespace,
+		WatchedNamespaces: ocArgs.watchedNamespaces,
 		Hub:               ocArgs.hub,
 		Tag:               ocArgs.tag,
+		Revision:          ocArgs.revision,
 	}
 	vals, err := util.RenderTemplate(tmpl, tv)
 	if err != nil {
@@ -74,4 +100,13 @@ tag: {{.Tag}}
 	}
 	manifest, err := r.RenderManifest(vals)
 	return vals, manifest, err
+}
+
+// deploymentExists returns true if the given deployment in the namespace exists.
+func deploymentExists(cs kubernetes.Interface, namespace, name string) (bool, error) {
+	d, err := cs.AppsV1().Deployments(namespace).Get(context.TODO(), name, v12.GetOptions{})
+	if err != nil {
+		return false, err
+	}
+	return d != nil, nil
 }

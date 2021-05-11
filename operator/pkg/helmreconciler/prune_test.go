@@ -18,10 +18,10 @@ import (
 	"context"
 	"io/ioutil"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -41,8 +41,7 @@ const (
 
 func TestHelmReconciler_DeleteControlPlaneByManifest(t *testing.T) {
 	t.Run("deleteControlPlaneByManifest", func(t *testing.T) {
-		s := runtime.NewScheme()
-		cl := fake.NewFakeClientWithScheme(s)
+		cl := fake.NewClientBuilder().Build()
 		df := filepath.Join(env.IstioSrc, "manifests/profiles/default.yaml")
 		iopStr, err := ioutil.ReadFile(df)
 		if err != nil {
@@ -55,7 +54,16 @@ func TestHelmReconciler_DeleteControlPlaneByManifest(t *testing.T) {
 		iop.Spec.Revision = testRevision
 		iop.Spec.InstallPackagePath = filepath.Join(env.IstioSrc, "manifests")
 
-		h := &HelmReconciler{client: cl, opts: &Options{ProgressLog: progress.NewLog(), Log: clog.NewDefaultLogger()}, iop: iop}
+		h := &HelmReconciler{
+			client: cl,
+			opts: &Options{
+				ProgressLog: progress.NewLog(),
+				Log:         clog.NewDefaultLogger(),
+			},
+			iop:           iop,
+			countLock:     &sync.Mutex{},
+			prunedKindSet: map[schema.GroupKind]struct{}{},
+		}
 		manifestMap, err := h.RenderCharts()
 		if err != nil {
 			t.Fatalf("failed to render manifest: %v", err)
@@ -95,7 +103,7 @@ func applyResourcesIntoCluster(t *testing.T, h *HelmReconciler, manifestMap name
 			if err := h.applyLabelsAndAnnotations(obju, cn); err != nil {
 				t.Errorf("failed to apply label and annotations: %v", err)
 			}
-			if err := h.ApplyObject(obj.UnstructuredObject()); err != nil {
+			if err := h.ApplyObject(obj.UnstructuredObject(), false); err != nil {
 				t.Errorf("HelmReconciler.ApplyObject() error = %v", err)
 			}
 		}

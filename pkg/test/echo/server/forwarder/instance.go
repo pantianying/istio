@@ -16,24 +16,27 @@ package forwarder
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
-	"github.com/golang/sync/errgroup"
+	"github.com/hashicorp/go-multierror"
+	"golang.org/x/sync/semaphore"
 
 	"istio.io/istio/pkg/test/echo/common"
 	"istio.io/istio/pkg/test/echo/proto"
-	"istio.io/pkg/log"
 )
 
 var _ io.Closer = &Instance{}
+
+const maxConcurrency = 20
 
 // Config for a forwarder Instance.
 type Config struct {
 	Request *proto.ForwardEchoRequest
 	UDS     string
-	TLSCert string
 	Dialer  common.Dialer
 }
 
@@ -53,6 +56,8 @@ type Instance struct {
 	qps         int
 	header      http.Header
 	message     string
+	// Method for the request. Only valid for HTTP
+	method string
 }
 
 // New creates a new forwarder Instance.
@@ -68,6 +73,7 @@ func New(cfg Config) (*Instance, error) {
 		p:           p,
 		url:         cfg.Request.Url,
 		serverFirst: cfg.Request.ServerFirst,
+		method:      cfg.Request.Method,
 		timeout:     common.GetTimeout(cfg.Request),
 		count:       common.GetCount(cfg.Request),
 		qps:         int(cfg.Request.Qps),
@@ -78,17 +84,27 @@ func New(cfg Config) (*Instance, error) {
 
 // Run the forwarder and collect the responses.
 func (i *Instance) Run(ctx context.Context) (*proto.ForwardEchoResponse, error) {
-	g, _ := errgroup.WithContext(context.Background())
+	g := multierror.Group{}
+	responsesMu := sync.RWMutex{}
 	responses := make([]string, i.count)
 
 	var throttle *time.Ticker
 
 	if i.qps > 0 {
 		sleepTime := time.Second / time.Duration(i.qps)
-		log.Debugf("Sleeping %v between requests", sleepTime)
+		fwLog.Debugf("Sleeping %v between requests", sleepTime)
 		throttle = time.NewTicker(sleepTime)
 	}
 
+	// make the timeout apply to the entire set of requests
+	ctx, cancel := context.WithTimeout(ctx, i.timeout)
+	var canceled bool
+	defer func() {
+		cancel()
+		canceled = true
+	}()
+
+	sem := semaphore.NewWeighted(maxConcurrency)
 	for reqIndex := 0; reqIndex < i.count; reqIndex++ {
 		r := request{
 			RequestID:   reqIndex,
@@ -97,25 +113,52 @@ func (i *Instance) Run(ctx context.Context) (*proto.ForwardEchoResponse, error) 
 			Header:      i.header,
 			Timeout:     i.timeout,
 			ServerFirst: i.serverFirst,
+			Method:      i.method,
 		}
 
 		if throttle != nil {
 			<-throttle.C
 		}
 
-		// TODO(nmittler): Refactor this to limit the number of go routines.
+		if err := sem.Acquire(ctx, 1); err != nil {
+			return nil, fmt.Errorf("failed acquiring semaphore: %v", err)
+		}
 		g.Go(func() error {
+			defer sem.Release(1)
+			if canceled {
+				return fmt.Errorf("request set timed out")
+			}
 			resp, err := i.p.makeRequest(ctx, &r)
 			if err != nil {
 				return err
 			}
+			responsesMu.Lock()
 			responses[r.RequestID] = resp
+			responsesMu.Unlock()
 			return nil
 		})
 	}
 
-	if err := g.Wait(); err != nil {
-		return nil, err
+	requestsDone := make(chan *multierror.Error)
+	go func() {
+		requestsDone <- g.Wait()
+	}()
+
+	select {
+	case err := <-requestsDone:
+		if err != nil {
+			return nil, fmt.Errorf("%d/%d requests had errors; first error: %v", err.Len(), i.count, err.Errors[0])
+		}
+	case <-ctx.Done():
+		responsesMu.RLock()
+		defer responsesMu.RUnlock()
+		c := 0
+		for _, res := range responses {
+			if res != "" {
+				c++
+			}
+		}
+		return nil, fmt.Errorf("request set timed out after %v and only %d/%d requests completed", i.timeout, c, i.count)
 	}
 
 	return &proto.ForwardEchoResponse{

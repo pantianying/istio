@@ -15,17 +15,17 @@
 package injection
 
 import (
+	"fmt"
 	"strings"
 
 	v1 "k8s.io/api/core/v1"
 
-	"istio.io/api/label"
-
 	"istio.io/api/annotation"
-
+	"istio.io/api/label"
 	"istio.io/istio/galley/pkg/config/analysis"
 	"istio.io/istio/galley/pkg/config/analysis/analyzers/util"
 	"istio.io/istio/galley/pkg/config/analysis/msg"
+	"istio.io/istio/pilot/pkg/serviceregistry/kube/controller"
 	"istio.io/istio/pkg/config/resource"
 	"istio.io/istio/pkg/config/schema/collection"
 	"istio.io/istio/pkg/config/schema/collections"
@@ -39,8 +39,8 @@ var _ analysis.Analyzer = &Analyzer{}
 // We assume that enablement is via an istio-injection=enabled or istio.io/rev namespace label
 // In theory, there can be alternatives using Mutatingwebhookconfiguration, but they're very uncommon
 // See https://istio.io/docs/ops/troubleshooting/injection/ for more info.
-const (
-	RevisionInjectionLabelName = label.IstioRev
+var (
+	RevisionInjectionLabelName = label.IoIstioRev.Name
 )
 
 // Metadata implements Analyzer
@@ -60,6 +60,9 @@ func (a *Analyzer) Analyze(c analysis.Context) {
 	injectedNamespaces := make(map[string]bool)
 
 	c.ForEach(collections.K8SCoreV1Namespaces.Name(), func(r *resource.Instance) bool {
+		if r.Metadata.FullName.Namespace == controller.IstioNamespace {
+			return true
+		}
 
 		ns := r.Metadata.FullName.String()
 		if util.IsSystemNamespace(resource.Namespace(ns)) {
@@ -73,16 +76,26 @@ func (a *Analyzer) Analyze(c analysis.Context) {
 			// TODO: if Istio is installed with sidecarInjectorWebhook.enableNamespacesByDefault=true
 			// (in the istio-sidecar-injector configmap), we need to reverse this logic and treat this as an injected namespace
 
-			c.Report(collections.K8SCoreV1Namespaces.Name(), msg.NewNamespaceNotInjected(r, r.Metadata.FullName.String(), r.Metadata.FullName.String()))
+			m := msg.NewNamespaceNotInjected(r, ns, ns)
+
+			if line, ok := util.ErrorLine(r, fmt.Sprintf(util.MetadataName)); ok {
+				m.Line = line
+			}
+
+			c.Report(collections.K8SCoreV1Namespaces.Name(), m)
 			return true
 		}
 
 		if okNewInjectionLabel {
 			if injectionLabel != "" {
-				c.Report(collections.K8SCoreV1Namespaces.Name(),
-					msg.NewNamespaceMultipleInjectionLabels(r,
-						r.Metadata.FullName.String(),
-						r.Metadata.FullName.String()))
+
+				m := msg.NewNamespaceMultipleInjectionLabels(r, ns, ns)
+
+				if line, ok := util.ErrorLine(r, fmt.Sprintf(util.MetadataName)); ok {
+					m.Line = line
+				}
+
+				c.Report(collections.K8SCoreV1Namespaces.Name(), m)
 				return true
 			}
 		} else if injectionLabel != util.InjectionLabelEnableValue {
@@ -90,7 +103,7 @@ func (a *Analyzer) Analyze(c analysis.Context) {
 			return true
 		}
 
-		injectedNamespaces[r.Metadata.FullName.String()] = true
+		injectedNamespaces[ns] = true
 
 		return true
 	})

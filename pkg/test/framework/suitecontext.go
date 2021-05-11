@@ -23,12 +23,12 @@ import (
 	"strings"
 	"sync"
 
+	"istio.io/istio/pkg/test/framework/components/cluster"
 	"istio.io/istio/pkg/test/framework/features"
-	"istio.io/istio/pkg/test/util/yml"
-
 	"istio.io/istio/pkg/test/framework/label"
 	"istio.io/istio/pkg/test/framework/resource"
 	"istio.io/istio/pkg/test/scopes"
+	"istio.io/istio/pkg/test/util/yml"
 )
 
 // suiteContext contains suite-level items used during runtime.
@@ -123,6 +123,20 @@ func (s *suiteContext) allocateResourceID(contextID string, r resource.Resource)
 	}
 }
 
+func (s *suiteContext) ConditionalCleanup(fn func()) {
+	s.globalScope.addCloser(&closer{fn: func() error {
+		fn()
+		return nil
+	}, noskip: true})
+}
+
+func (s *suiteContext) Cleanup(fn func()) {
+	s.globalScope.addCloser(&closer{fn: func() error {
+		fn()
+		return nil
+	}})
+}
+
 // TrackResource adds a new resource to track to the context at this level.
 func (s *suiteContext) TrackResource(r resource.Resource) resource.ID {
 	id := s.allocateResourceID(s.globalScope.id, r)
@@ -139,7 +153,7 @@ func (s *suiteContext) Environment() resource.Environment {
 	return s.environment
 }
 
-func (s *suiteContext) Clusters() resource.Clusters {
+func (s *suiteContext) Clusters() cluster.Clusters {
 	return s.Environment().Clusters()
 }
 
@@ -177,7 +191,7 @@ func (s *suiteContext) CreateTmpDirectory(prefix string) (string, error) {
 	return dir, err
 }
 
-func (s *suiteContext) Config(clusters ...resource.Cluster) resource.ConfigManager {
+func (s *suiteContext) Config(clusters ...cluster.Cluster) resource.ConfigManager {
 	return newConfigManager(s, clusters)
 }
 

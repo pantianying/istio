@@ -36,16 +36,18 @@ import (
 	"github.com/golang/protobuf/ptypes/duration"
 	pstruct "github.com/golang/protobuf/ptypes/struct"
 	"github.com/golang/protobuf/ptypes/wrappers"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	meshconfig "istio.io/api/mesh/v1alpha1"
 	networking "istio.io/api/networking/v1alpha3"
-	"istio.io/pkg/log"
-
 	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/serviceregistry"
+	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/host"
+	"istio.io/istio/pkg/config/labels"
 	"istio.io/istio/pkg/util/strcase"
+	"istio.io/pkg/log"
 )
 
 const (
@@ -65,9 +67,6 @@ const (
 	// Inbound pass through cluster need to the bind the loopback ip address for the security and loop avoidance.
 	InboundPassthroughClusterIpv4 = "InboundPassthroughClusterIpv4"
 	InboundPassthroughClusterIpv6 = "InboundPassthroughClusterIpv6"
-	// 6 is the magical number for inbound: 15006, 127.0.0.6, ::6
-	InboundPassthroughBindIpv4 = "127.0.0.6"
-	InboundPassthroughBindIpv6 = "::6"
 
 	// SniClusterFilter is the name of the sni_cluster envoy filter
 	SniClusterFilter = "envoy.filters.network.sni_cluster"
@@ -149,6 +148,15 @@ func getMaxCidrPrefix(addr string) uint32 {
 	}
 	// ipv4 address
 	return 32
+}
+
+func ListContains(haystack []string, needle string) bool {
+	for _, n := range haystack {
+		if needle == n {
+			return true
+		}
+	}
+	return false
 }
 
 // ConvertAddressToCidr converts from string to CIDR proto
@@ -243,7 +251,7 @@ func GogoDurationToDuration(d *types.Duration) *duration.Duration {
 		log.Warnf("error converting duration %#v, using 0: %v", d, err)
 		return nil
 	}
-	return ptypes.DurationProto(dur)
+	return durationpb.New(dur)
 }
 
 // SortVirtualHosts sorts a slice of virtual hosts by name.
@@ -259,16 +267,10 @@ func SortVirtualHosts(hosts []*route.VirtualHost) {
 	})
 }
 
-// IsIstioVersionGE15 checks whether the given Istio version is greater than or equals 1.5.
-func IsIstioVersionGE15(node *model.Proxy) bool {
-	return node.IstioVersion == nil ||
-		node.IstioVersion.Compare(&model.IstioVersion{Major: 1, Minor: 5, Patch: -1}) >= 0
-}
-
-// IsIstioVersionGE17 checks whether the given Istio version is greater than or equals 1.7.
-func IsIstioVersionGE17(node *model.Proxy) bool {
-	return node.IstioVersion == nil ||
-		node.IstioVersion.Compare(&model.IstioVersion{Major: 1, Minor: 7, Patch: -1}) >= 0
+// IsIstioVersionGE19 checks whether the given Istio version is greater than or equals 1.9.
+func IsIstioVersionGE19(node *model.Proxy) bool {
+	return node == nil || node.IstioVersion == nil ||
+		node.IstioVersion.Compare(&model.IstioVersion{Major: 1, Minor: 9, Patch: -1}) >= 0
 }
 
 func IsProtocolSniffingEnabledForPort(port *model.Port) bool {
@@ -289,7 +291,7 @@ func ConvertLocality(locality string) *core.Locality {
 		return &core.Locality{}
 	}
 
-	region, zone, subzone := SplitLocality(locality)
+	region, zone, subzone := model.SplitLocalityLabel(locality)
 	return &core.Locality{
 		Region:  region,
 		Zone:    zone,
@@ -297,7 +299,7 @@ func ConvertLocality(locality string) *core.Locality {
 	}
 }
 
-// ConvertLocality converts '/' separated locality string to Locality struct.
+// LocalityToString converts Locality struct to '/' separated locality string.
 func LocalityToString(l *core.Locality) string {
 	if l == nil {
 		return ""
@@ -323,7 +325,7 @@ func IsLocalityEmpty(locality *core.Locality) bool {
 }
 
 func LocalityMatch(proxyLocality *core.Locality, ruleLocality string) bool {
-	ruleRegion, ruleZone, ruleSubzone := SplitLocality(ruleLocality)
+	ruleRegion, ruleZone, ruleSubzone := model.SplitLocalityLabel(ruleLocality)
 	regionMatch := ruleRegion == "*" || proxyLocality.GetRegion() == ruleRegion
 	zoneMatch := ruleZone == "*" || ruleZone == "" || proxyLocality.GetZone() == ruleZone
 	subzoneMatch := ruleSubzone == "*" || ruleSubzone == "" || proxyLocality.GetSubZone() == ruleSubzone
@@ -332,18 +334,6 @@ func LocalityMatch(proxyLocality *core.Locality, ruleLocality string) bool {
 		return true
 	}
 	return false
-}
-
-func SplitLocality(locality string) (region, zone, subzone string) {
-	items := strings.Split(locality, "/")
-	switch len(items) {
-	case 1:
-		return items[0], "", ""
-	case 2:
-		return items[0], items[1], ""
-	default:
-		return items[0], items[1], items[2]
-	}
 }
 
 func LbPriority(proxyLocality, endpointsLocality *core.Locality) int {
@@ -394,41 +384,45 @@ func cloneLocalityLbEndpoints(endpoints []*endpoint.LocalityLbEndpoints) []*endp
 
 // BuildConfigInfoMetadata builds core.Metadata struct containing the
 // name.namespace of the config, the type, etc.
-func BuildConfigInfoMetadata(config model.ConfigMeta) *core.Metadata {
-	s := "/apis/" + config.GroupVersionKind.Group + "/" + config.GroupVersionKind.Version + "/namespaces/" + config.Namespace + "/" +
-		strcase.CamelCaseToKebabCase(config.GroupVersionKind.Kind) + "/" + config.Name
-	return &core.Metadata{
-		FilterMetadata: map[string]*pstruct.Struct{
-			IstioMetadataKey: {
-				Fields: map[string]*pstruct.Value{
-					"config": {
-						Kind: &pstruct.Value_StringValue{
-							StringValue: s,
-						},
-					},
-				},
-			},
-		},
-	}
+func BuildConfigInfoMetadata(config config.Meta) *core.Metadata {
+	return AddConfigInfoMetadata(nil, config)
 }
 
-// AddSubsetToMetadata will build a new core.Metadata struct containing the
-// subset name supplied. This is used for telemetry reporting. A new core.Metadata
-// is created to prevent modification to shared base Metadata across subsets, etc.
-// This should be called after the initial "istio" metadata has been created for the
-// cluster. If the "istio" metadata field is not already defined, the subset information will
-// not be added (to prevent adding this information where not needed).
-func AddSubsetToMetadata(md *core.Metadata, subset string) *core.Metadata {
-	updatedMeta := &core.Metadata{}
-	proto.Merge(updatedMeta, md)
-	if istioMeta, ok := updatedMeta.FilterMetadata[IstioMetadataKey]; ok {
+// AddConfigInfoMetadata adds name.namespace of the config, the type, etc
+// to the given core.Metadata struct, if metadata is not initialized, build a new metadata.
+func AddConfigInfoMetadata(metadata *core.Metadata, config config.Meta) *core.Metadata {
+	if metadata == nil {
+		metadata = &core.Metadata{
+			FilterMetadata: map[string]*pstruct.Struct{},
+		}
+	}
+	s := "/apis/" + config.GroupVersionKind.Group + "/" + config.GroupVersionKind.Version + "/namespaces/" + config.Namespace + "/" +
+		strcase.CamelCaseToKebabCase(config.GroupVersionKind.Kind) + "/" + config.Name
+	if _, ok := metadata.FilterMetadata[IstioMetadataKey]; !ok {
+		metadata.FilterMetadata[IstioMetadataKey] = &pstruct.Struct{
+			Fields: map[string]*pstruct.Value{},
+		}
+	}
+	metadata.FilterMetadata[IstioMetadataKey].Fields["config"] = &pstruct.Value{
+		Kind: &pstruct.Value_StringValue{
+			StringValue: s,
+		},
+	}
+	return metadata
+}
+
+// AddSubsetToMetadata will insert the subset name supplied. This should be called after the initial
+// "istio" metadata has been created for the cluster. If the "istio" metadata field is not already
+// defined, the subset information will not be added (to prevent adding this information where not
+// needed). This is used for telemetry reporting.
+func AddSubsetToMetadata(md *core.Metadata, subset string) {
+	if istioMeta, ok := md.FilterMetadata[IstioMetadataKey]; ok {
 		istioMeta.Fields["subset"] = &pstruct.Value{
 			Kind: &pstruct.Value_StringValue{
 				StringValue: subset,
 			},
 		}
 	}
-	return updatedMeta
 }
 
 // IsHTTPFilterChain returns true if the filter chain contains a HTTP connection manager filter
@@ -447,9 +441,11 @@ func IsHTTPFilterChain(filterChain *listener.FilterChain) bool {
 func MergeAnyWithStruct(a *any.Any, pbStruct *pstruct.Struct) (*any.Any, error) {
 	// Assuming that Pilot is compiled with this type [which should always be the case]
 	var err error
+	// nolint: staticcheck
 	var x ptypes.DynamicAny
 
 	// First get an object of type used by this message
+	// nolint: staticcheck
 	if err = ptypes.UnmarshalAny(a, &x); err != nil {
 		return nil, err
 	}
@@ -465,6 +461,7 @@ func MergeAnyWithStruct(a *any.Any, pbStruct *pstruct.Struct) (*any.Any, error) 
 	proto.Merge(x.Message, temp)
 	var retVal *any.Any
 	// Convert the merged proto back to any
+	// nolint: staticcheck
 	if retVal, err = ptypes.MarshalAny(x.Message); err != nil {
 		return nil, err
 	}
@@ -477,14 +474,17 @@ func MergeAnyWithStruct(a *any.Any, pbStruct *pstruct.Struct) (*any.Any, error) 
 func MergeAnyWithAny(dst *any.Any, src *any.Any) (*any.Any, error) {
 	// Assuming that Pilot is compiled with this type [which should always be the case]
 	var err error
+	// nolint: staticcheck
 	var dstX, srcX ptypes.DynamicAny
 
 	// get an object of type used by this message
+	// nolint: staticcheck
 	if err = ptypes.UnmarshalAny(dst, &dstX); err != nil {
 		return nil, err
 	}
 
 	// get an object of type used by this message
+	// nolint: staticcheck
 	if err = ptypes.UnmarshalAny(src, &srcX); err != nil {
 		return nil, err
 	}
@@ -493,6 +493,7 @@ func MergeAnyWithAny(dst *any.Any, src *any.Any) (*any.Any, error) {
 	proto.Merge(dstX.Message, srcX.Message)
 	var retVal *any.Any
 	// Convert the merged proto back to dst
+	// nolint: staticcheck
 	if retVal, err = ptypes.MarshalAny(dstX.Message); err != nil {
 		return nil, err
 	}
@@ -501,8 +502,8 @@ func MergeAnyWithAny(dst *any.Any, src *any.Any) (*any.Any, error) {
 }
 
 // BuildLbEndpointMetadata adds metadata values to a lb endpoint
-func BuildLbEndpointMetadata(network string, tlsMode string, push *model.PushContext) *core.Metadata {
-	if network == "" && tlsMode == model.DisabledTLSModeLabel {
+func BuildLbEndpointMetadata(network, tlsMode, workloadname, namespace, clusterID string, labels labels.Instance) *core.Metadata {
+	if network == "" && (tlsMode == "" || tlsMode == model.DisabledTLSModeLabel) && !features.EndpointTelemetryLabel {
 		return nil
 	}
 
@@ -511,16 +512,10 @@ func BuildLbEndpointMetadata(network string, tlsMode string, push *model.PushCon
 	}
 
 	if network != "" {
-		metadata.FilterMetadata[IstioMetadataKey] = &pstruct.Struct{
-			Fields: map[string]*pstruct.Value{},
-		}
-
-		if network != "" {
-			metadata.FilterMetadata[IstioMetadataKey].Fields["network"] = &pstruct.Value{Kind: &pstruct.Value_StringValue{StringValue: network}}
-		}
+		addIstioEndpointLabel(metadata, "network", &pstruct.Value{Kind: &pstruct.Value_StringValue{StringValue: network}})
 	}
 
-	if tlsMode != "" {
+	if tlsMode != "" && tlsMode != model.DisabledTLSModeLabel {
 		metadata.FilterMetadata[EnvoyTransportSocketMetadataKey] = &pstruct.Struct{
 			Fields: map[string]*pstruct.Value{
 				model.TLSModeLabelShortname: {Kind: &pstruct.Value_StringValue{StringValue: tlsMode}},
@@ -528,7 +523,40 @@ func BuildLbEndpointMetadata(network string, tlsMode string, push *model.PushCon
 		}
 	}
 
+	// Add compressed telemetry metadata. Note this is a short term solution to make server workload metadata
+	// available at client sidecar, so that telemetry filter could use for metric labels. This is useful for two cases:
+	// server does not have sidecar injected, and request fails to reach server and thus metadata exchange does not happen.
+	// Due to performance concern, telemetry metadata is compressed into a semicolon separted string:
+	// workload-name;namespace;canonical-service-name;canonical-service-revision;cluster-id.
+	if features.EndpointTelemetryLabel {
+		var sb strings.Builder
+		sb.WriteString(workloadname)
+		sb.WriteString(";")
+		sb.WriteString(namespace)
+		sb.WriteString(";")
+		if csn, ok := labels[model.IstioCanonicalServiceLabelName]; ok {
+			sb.WriteString(csn)
+		}
+		sb.WriteString(";")
+		if csr, ok := labels[model.IstioCanonicalServiceRevisionLabelName]; ok {
+			sb.WriteString(csr)
+		}
+		sb.WriteString(";")
+		sb.WriteString(clusterID)
+		addIstioEndpointLabel(metadata, "workload", &pstruct.Value{Kind: &pstruct.Value_StringValue{StringValue: sb.String()}})
+	}
+
 	return metadata
+}
+
+func addIstioEndpointLabel(metadata *core.Metadata, key string, val *pstruct.Value) {
+	if _, ok := metadata.FilterMetadata[IstioMetadataKey]; !ok {
+		metadata.FilterMetadata[IstioMetadataKey] = &pstruct.Struct{
+			Fields: map[string]*pstruct.Value{},
+		}
+	}
+
+	metadata.FilterMetadata[IstioMetadataKey].Fields[key] = val
 }
 
 // IsAllowAnyOutbound checks if allow_any is enabled for outbound traffic
@@ -570,6 +598,19 @@ func StringToExactMatch(in []string) []*matcher.StringMatcher {
 	return res
 }
 
+func StringToPrefixMatch(in []string) []*matcher.StringMatcher {
+	if len(in) == 0 {
+		return nil
+	}
+	res := make([]*matcher.StringMatcher, 0, len(in))
+	for _, s := range in {
+		res = append(res, &matcher.StringMatcher{
+			MatchPattern: &matcher.StringMatcher_Prefix{Prefix: s},
+		})
+	}
+	return res
+}
+
 func StringSliceEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -604,7 +645,15 @@ func CidrRangeSliceEqual(a, b []*core.CidrRange) bool {
 	}
 
 	for i := range a {
-		if a[i].GetAddressPrefix() != b[i].GetAddressPrefix() || a[i].GetPrefixLen().GetValue() != b[i].GetPrefixLen().GetValue() {
+		netA, err := toIPNet(a[i])
+		if err != nil {
+			return false
+		}
+		netB, err := toIPNet(b[i])
+		if err != nil {
+			return false
+		}
+		if netA.IP.String() != netB.IP.String() {
 			return false
 		}
 	}
@@ -612,8 +661,32 @@ func CidrRangeSliceEqual(a, b []*core.CidrRange) bool {
 	return true
 }
 
+func toIPNet(c *core.CidrRange) (*net.IPNet, error) {
+	_, cA, err := net.ParseCIDR(c.AddressPrefix + "/" + strconv.Itoa(int(c.PrefixLen.GetValue())))
+	if err != nil {
+		log.Errorf("failed to parse CidrRange %v as IPNet: %v", c, err)
+	}
+	return cA, err
+}
+
 // meshconfig ForwardClientCertDetails and the Envoy config enum are off by 1
 // due to the UNDEFINED in the meshconfig ForwardClientCertDetails
 func MeshConfigToEnvoyForwardClientCertDetails(c meshconfig.Topology_ForwardClientCertDetails) http_conn.HttpConnectionManager_ForwardClientCertDetails {
 	return http_conn.HttpConnectionManager_ForwardClientCertDetails(c - 1)
+}
+
+// ByteCount returns a human readable byte format
+// Inspired by https://yourbasic.org/golang/formatting-byte-size-to-human-readable-format/
+func ByteCount(b int) string {
+	const unit = 1000
+	if b < unit {
+		return fmt.Sprintf("%dB", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f%cB",
+		float64(b)/float64(div), "kMGTPE"[exp])
 }

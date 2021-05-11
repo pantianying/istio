@@ -21,7 +21,7 @@
 set -e
 
 # Match pilot/docker/Dockerfile.proxyv2
-export ISTIO_META_ISTIO_VERSION="1.8.0"
+export ISTIO_META_ISTIO_VERSION="1.11.0"
 
 set -a
 # Load optional config variables
@@ -59,6 +59,14 @@ fi
 
 if [ -z "${POD_NAME:-}" ]; then
   POD_NAME=$(hostname -s)
+fi
+
+if [[ ${1-} == "clean" ]] ; then
+  if [ "${ISTIO_CUSTOM_IP_TABLES}" != "true" ] ; then
+    # clean the previous Istio iptables chains.
+    "${ISTIO_BIN_BASE}/pilot-agent" istio-clean-iptables
+  fi
+  exit 0
 fi
 
 # Init option will only initialize iptables. set ISTIO_CUSTOM_IP_TABLES to true if you would like to ignore this step
@@ -120,6 +128,11 @@ if [ ${EXEC_USER} == "${USER:-}" ] ; then
   INSTANCE_IP=${ISTIO_SVC_IP} POD_NAME=${POD_NAME} POD_NAMESPACE=${NS} "${ISTIO_BIN_BASE}/pilot-agent" proxy "${ISTIO_AGENT_FLAGS_ARRAY[@]}"
 else
 
+# su will mess with the limits set on the process we run. This may lead to quickly exhausting the file limits
+# We will get the host limit and set it in the child as well.
+# TODO(https://superuser.com/questions/1645513/why-does-executing-a-command-in-su-change-limits) can we do better?
+currentLimit=$(ulimit -n)
+
 # Will run: ${ISTIO_BIN_BASE}/envoy -c $ENVOY_CFG --restart-epoch 0 --drain-time-s 2 --parent-shutdown-time-s 3 --service-cluster $SVC --service-node 'sidecar~${ISTIO_SVC_IP}~${POD_NAME}.${NS}.svc.cluster.local~${NS}.svc.cluster.local' $ISTIO_DEBUG >${ISTIO_LOG_DIR}/istio.log" istio-proxy
-exec su -s /bin/bash -c "INSTANCE_IP=${ISTIO_SVC_IP} POD_NAME=${POD_NAME} POD_NAMESPACE=${NS} exec ${ISTIO_BIN_BASE}/pilot-agent proxy ${ISTIO_AGENT_FLAGS_ARRAY[*]} 2> ${ISTIO_LOG_DIR}/istio.err.log > ${ISTIO_LOG_DIR}/istio.log" ${EXEC_USER}
+exec su -s /bin/bash -c "ulimit -n ${currentLimit}; INSTANCE_IP=${ISTIO_SVC_IP} POD_NAME=${POD_NAME} POD_NAMESPACE=${NS} exec ${ISTIO_BIN_BASE}/pilot-agent proxy ${ISTIO_AGENT_FLAGS_ARRAY[*]} 2> ${ISTIO_LOG_DIR}/istio.err.log > ${ISTIO_LOG_DIR}/istio.log" ${EXEC_USER}
 fi

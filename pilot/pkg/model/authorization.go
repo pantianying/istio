@@ -16,21 +16,18 @@ package model
 
 import (
 	authpb "istio.io/api/security/v1beta1"
-
-	istiolog "istio.io/pkg/log"
-
 	"istio.io/istio/pkg/config/labels"
 	"istio.io/istio/pkg/config/schema/collections"
+	istiolog "istio.io/pkg/log"
 )
 
-var (
-	authzLog = istiolog.RegisterScope("authorization", "Istio Authorization Policy", 0)
-)
+var authzLog = istiolog.RegisterScope("authorization", "Istio Authorization Policy", 0)
 
 type AuthorizationPolicy struct {
-	Name      string                      `json:"name"`
-	Namespace string                      `json:"namespace"`
-	Spec      *authpb.AuthorizationPolicy `json:"spec"`
+	Name        string                      `json:"name"`
+	Namespace   string                      `json:"namespace"`
+	Annotations map[string]string           `json:"annotations"`
+	Spec        *authpb.AuthorizationPolicy `json:"spec"`
 }
 
 // AuthorizationPolicies organizes AuthorizationPolicy by namespace.
@@ -56,9 +53,10 @@ func GetAuthorizationPolicies(env *Environment) (*AuthorizationPolicies, error) 
 	sortConfigByCreationTime(policies)
 	for _, config := range policies {
 		authzConfig := AuthorizationPolicy{
-			Name:      config.Name,
-			Namespace: config.Namespace,
-			Spec:      config.Spec.(*authpb.AuthorizationPolicy),
+			Name:        config.Name,
+			Namespace:   config.Namespace,
+			Annotations: config.Annotations,
+			Spec:        config.Spec.(*authpb.AuthorizationPolicy),
 		}
 		policy.NamespaceToPolicies[config.Namespace] =
 			append(policy.NamespaceToPolicies[config.Namespace], authzConfig)
@@ -67,11 +65,18 @@ func GetAuthorizationPolicies(env *Environment) (*AuthorizationPolicies, error) 
 	return policy, nil
 }
 
-// ListAuthorizationPolicies returns the deny and allow AuthorizationPolicy for the workload in the given namespace.
-func (policy *AuthorizationPolicies) ListAuthorizationPolicies(namespace string, workload labels.Collection) (
-	denyPolicies []AuthorizationPolicy, allowPolicies []AuthorizationPolicy) {
+type AuthorizationPoliciesResult struct {
+	Custom []AuthorizationPolicy
+	Deny   []AuthorizationPolicy
+	Allow  []AuthorizationPolicy
+	Audit  []AuthorizationPolicy
+}
+
+// ListAuthorizationPolicies returns authorization policies applied to the workload in the given namespace.
+func (policy *AuthorizationPolicies) ListAuthorizationPolicies(namespace string, workload labels.Collection) AuthorizationPoliciesResult {
+	ret := AuthorizationPoliciesResult{}
 	if policy == nil {
-		return
+		return ret
 	}
 
 	var namespaces []string
@@ -90,9 +95,13 @@ func (policy *AuthorizationPolicies) ListAuthorizationPolicies(namespace string,
 			if workload.IsSupersetOf(selector) {
 				switch config.Spec.GetAction() {
 				case authpb.AuthorizationPolicy_ALLOW:
-					allowPolicies = append(allowPolicies, config)
+					ret.Allow = append(ret.Allow, config)
 				case authpb.AuthorizationPolicy_DENY:
-					denyPolicies = append(denyPolicies, config)
+					ret.Deny = append(ret.Deny, config)
+				case authpb.AuthorizationPolicy_AUDIT:
+					ret.Audit = append(ret.Audit, config)
+				case authpb.AuthorizationPolicy_CUSTOM:
+					ret.Custom = append(ret.Custom, config)
 				default:
 					log.Errorf("ignored authorization policy %s.%s with unsupported action: %s",
 						config.Namespace, config.Name, config.Spec.GetAction())
@@ -101,5 +110,5 @@ func (policy *AuthorizationPolicies) ListAuthorizationPolicies(namespace string,
 		}
 	}
 
-	return
+	return ret
 }

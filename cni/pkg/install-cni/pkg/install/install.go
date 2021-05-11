@@ -22,12 +22,12 @@ import (
 	"path/filepath"
 	"sync/atomic"
 
-	"github.com/coreos/etcd/pkg/fileutil"
 	"github.com/pkg/errors"
 
 	"istio.io/istio/cni/pkg/install-cni/pkg/config"
 	"istio.io/istio/cni/pkg/install-cni/pkg/constants"
 	"istio.io/istio/cni/pkg/install-cni/pkg/util"
+	"istio.io/istio/pkg/file"
 	"istio.io/pkg/log"
 )
 
@@ -51,7 +51,9 @@ func NewInstaller(cfg *config.Config, isReady *atomic.Value) *Installer {
 // If an invalid configuration is detected, the installation process will restart to restore a valid state.
 func (in *Installer) Run(ctx context.Context) (err error) {
 	for {
-		if err = copyBinaries(in.cfg.UpdateCNIBinaries, in.cfg.SkipCNIBinaries); err != nil {
+		if err = copyBinaries(
+			in.cfg.CNIBinSourceDir, in.cfg.CNIBinTargetDirs,
+			in.cfg.UpdateCNIBinaries, in.cfg.SkipCNIBinaries); err != nil {
 			return
 		}
 
@@ -78,7 +80,7 @@ func (in *Installer) Run(ctx context.Context) (err error) {
 // Cleanup remove Istio CNI's config, kubeconfig file, and binaries.
 func (in *Installer) Cleanup() error {
 	log.Info("Cleaning up.")
-	if len(in.cniConfigFilepath) > 0 && fileutil.Exist(in.cniConfigFilepath) {
+	if len(in.cniConfigFilepath) > 0 && file.Exists(in.cniConfigFilepath) {
 		if in.cfg.ChainedCNIPlugin {
 			log.Infof("Removing Istio CNI config from CNI config file: %s", in.cniConfigFilepath)
 
@@ -107,7 +109,7 @@ func (in *Installer) Cleanup() error {
 			if err != nil {
 				return err
 			}
-			if err = util.AtomicWrite(in.cniConfigFilepath, cniConfig, os.FileMode(0644)); err != nil {
+			if err = file.AtomicWrite(in.cniConfigFilepath, cniConfig, os.FileMode(0644)); err != nil {
 				return err
 			}
 		} else {
@@ -118,22 +120,25 @@ func (in *Installer) Cleanup() error {
 		}
 	}
 
-	if len(in.kubeconfigFilepath) > 0 && fileutil.Exist(in.kubeconfigFilepath) {
+	if len(in.kubeconfigFilepath) > 0 && file.Exists(in.kubeconfigFilepath) {
 		log.Infof("Removing Istio CNI kubeconfig file: %s", in.kubeconfigFilepath)
 		if err := os.Remove(in.kubeconfigFilepath); err != nil {
 			return err
 		}
 	}
 
-	log.Info("Removing existing binaries")
-	if istioCNIBin := filepath.Join(constants.HostCNIBinDir, "istio-cni"); fileutil.Exist(istioCNIBin) {
-		if err := os.Remove(istioCNIBin); err != nil {
-			return err
+	for _, targetDir := range in.cfg.CNIBinTargetDirs {
+		if istioCNIBin := filepath.Join(targetDir, "istio-cni"); file.Exists(istioCNIBin) {
+			log.Infof("Removing binary: %s", istioCNIBin)
+			if err := os.Remove(istioCNIBin); err != nil {
+				return err
+			}
 		}
-	}
-	if istioIptablesBin := filepath.Join(constants.HostCNIBinDir, "istio-iptables"); fileutil.Exist(istioIptablesBin) {
-		if err := os.Remove(istioIptablesBin); err != nil {
-			return err
+		if istioIptablesBin := filepath.Join(targetDir, "istio-iptables"); file.Exists(istioIptablesBin) {
+			log.Infof("Removing binary: %s", istioIptablesBin)
+			if err := os.Remove(istioIptablesBin); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -141,7 +146,7 @@ func (in *Installer) Cleanup() error {
 
 func readServiceAccountToken() (string, error) {
 	saToken := constants.ServiceAccountPath + "/token"
-	if !fileutil.Exist(saToken) {
+	if !file.Exists(saToken) {
 		return "", fmt.Errorf("service account token file %s does not exist. Is this not running within a pod?", saToken)
 	}
 
@@ -210,7 +215,7 @@ func checkInstall(cfg *config.Config, cniConfigFilepath string) error {
 		}
 	}
 
-	if !fileutil.Exist(cniConfigFilepath) {
+	if !file.Exists(cniConfigFilepath) {
 		return fmt.Errorf("CNI config file removed: %s", cniConfigFilepath)
 	}
 

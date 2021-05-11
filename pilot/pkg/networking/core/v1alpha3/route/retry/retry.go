@@ -19,18 +19,15 @@ import (
 	"strconv"
 	"strings"
 
+	previouspriorities "github.com/envoyproxy/go-control-plane/envoy/config/retry/previous_priorities"
 	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
 	"github.com/golang/protobuf/ptypes/wrappers"
-
-	previouspriorities "github.com/envoyproxy/go-control-plane/envoy/config/retry/previous_priorities"
 
 	networking "istio.io/api/networking/v1alpha3"
 	"istio.io/istio/pilot/pkg/networking/util"
 )
 
-var (
-	defaultRetryPriorityTypedConfig = util.MessageToAny(buildPreviousPrioritiesConfig())
-)
+var defaultRetryPriorityTypedConfig = util.MessageToAny(buildPreviousPrioritiesConfig())
 
 // DefaultPolicy gets a copy of the default retry policy.
 func DefaultPolicy() *route.RetryPolicy {

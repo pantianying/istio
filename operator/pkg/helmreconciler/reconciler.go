@@ -22,8 +22,12 @@ import (
 	"sync"
 	"time"
 
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	v12 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -31,12 +35,15 @@ import (
 
 	"istio.io/api/label"
 	"istio.io/api/operator/v1alpha1"
+	"istio.io/istio/istioctl/pkg/install/k8sversion"
 	valuesv1alpha1 "istio.io/istio/operator/pkg/apis/istio/v1alpha1"
+	"istio.io/istio/operator/pkg/metrics"
 	"istio.io/istio/operator/pkg/name"
 	"istio.io/istio/operator/pkg/object"
 	"istio.io/istio/operator/pkg/util"
 	"istio.io/istio/operator/pkg/util/clog"
 	"istio.io/istio/operator/pkg/util/progress"
+	"istio.io/istio/pkg/config/constants"
 	"istio.io/pkg/version"
 )
 
@@ -52,6 +59,10 @@ type HelmReconciler struct {
 	// dependencyWaitCh is a map of signaling channels. A parent with children ch1...chN will signal
 	// dependencyWaitCh[ch1]...dependencyWaitCh[chN] when it's completely installed.
 	dependencyWaitCh map[name.ComponentName]chan struct{}
+
+	// The fields below are for metrics and reporting
+	countLock     *sync.Mutex
+	prunedKindSet map[schema.GroupKind]struct{}
 }
 
 // Options are options for HelmReconciler.
@@ -84,25 +95,24 @@ func NewHelmReconciler(client client.Client, restConfig *rest.Config, iop *value
 	if opts.ProgressLog == nil {
 		opts.ProgressLog = progress.NewLog()
 	}
-	if waitForResourcesTimeoutStr, found := os.LookupEnv("WAIT_FOR_RESOURCES_TIMEOUT"); found {
-		if waitForResourcesTimeout, err := time.ParseDuration(waitForResourcesTimeoutStr); err == nil {
-			opts.WaitTimeout = waitForResourcesTimeout
+	if int64(opts.WaitTimeout) == 0 {
+		if waitForResourcesTimeoutStr, found := os.LookupEnv("WAIT_FOR_RESOURCES_TIMEOUT"); found {
+			if waitForResourcesTimeout, err := time.ParseDuration(waitForResourcesTimeoutStr); err == nil {
+				opts.WaitTimeout = waitForResourcesTimeout
+			} else {
+				scope.Warnf("invalid env variable value: %s for 'WAIT_FOR_RESOURCES_TIMEOUT'! falling back to default value...", waitForResourcesTimeoutStr)
+				// fallback to default wait resource timeout
+				opts.WaitTimeout = defaultWaitResourceTimeout
+			}
 		} else {
-			scope.Warnf("invalid env variable value: %s for 'WAIT_FOR_RESOURCES_TIMEOUT'! falling back to default value...", waitForResourcesTimeoutStr)
 			// fallback to default wait resource timeout
 			opts.WaitTimeout = defaultWaitResourceTimeout
 		}
-	} else {
-		// fallback to default wait resource timeout
-		opts.WaitTimeout = defaultWaitResourceTimeout
 	}
 	if iop == nil {
 		// allows controller code to function for cases where IOP is not provided (e.g. operator remove).
 		iop = &valuesv1alpha1.IstioOperator{}
 		iop.Spec = &v1alpha1.IstioOperatorSpec{}
-	}
-	if operatorRevision, found := os.LookupEnv("REVISION"); found {
-		iop.Spec.Revision = operatorRevision
 	}
 	var cs *kubernetes.Clientset
 	var err error
@@ -119,6 +129,8 @@ func NewHelmReconciler(client client.Client, restConfig *rest.Config, iop *value
 		iop:              iop,
 		opts:             opts,
 		dependencyWaitCh: initDependencies(),
+		countLock:        &sync.Mutex{},
+		prunedKindSet:    make(map[schema.GroupKind]struct{}),
 	}, nil
 }
 
@@ -135,6 +147,9 @@ func initDependencies() map[name.ComponentName]chan struct{} {
 
 // Reconcile reconciles the associated resources.
 func (h *HelmReconciler) Reconcile() (*v1alpha1.InstallStatus, error) {
+	if err := h.createNamespace(valuesv1alpha1.Namespace(h.iop.Spec), h.networkName()); err != nil {
+		return nil, err
+	}
 	manifestMap, err := h.RenderCharts()
 	if err != nil {
 		return nil, err
@@ -144,6 +159,7 @@ func (h *HelmReconciler) Reconcile() (*v1alpha1.InstallStatus, error) {
 
 	h.opts.ProgressLog.SetState(progress.StatePruning)
 	pruneErr := h.Prune(manifestMap, false)
+	h.reportPrunedObjectKind()
 	return status, pruneErr
 }
 
@@ -156,6 +172,8 @@ func (h *HelmReconciler) processRecursive(manifests name.ManifestMap) *v1alpha1.
 	var mu sync.Mutex
 	// wg waits for all manifest processing goroutines to finish
 	var wg sync.WaitGroup
+
+	serverSideApply := h.CheckSSAEnabled()
 
 	for c, ms := range manifests {
 		c, ms := c, ms
@@ -183,7 +201,7 @@ func (h *HelmReconciler) processRecursive(manifests name.ManifestMap) *v1alpha1.
 					Name:    c,
 					Content: name.MergeManifestSlices(ms),
 				}
-				processedObjs, deployedObjects, err = h.ApplyManifest(m)
+				processedObjs, deployedObjects, err = h.ApplyManifest(m, serverSideApply)
 				if err != nil {
 					status = v1alpha1.InstallStatus_ERROR
 				} else if len(processedObjs) != 0 || deployedObjects > 0 {
@@ -204,6 +222,8 @@ func (h *HelmReconciler) processRecursive(manifests name.ManifestMap) *v1alpha1.
 	}
 	wg.Wait()
 
+	metrics.ReportOwnedResourceCounts()
+
 	out := &v1alpha1.InstallStatus{
 		Status:          overallStatus(componentStatus),
 		ComponentStatus: componentStatus,
@@ -212,19 +232,54 @@ func (h *HelmReconciler) processRecursive(manifests name.ManifestMap) *v1alpha1.
 	return out
 }
 
+// CheckSSAEnabled is a helper function to check whether ServerSideApply should be used when applying manifests.
+func (h *HelmReconciler) CheckSSAEnabled() bool {
+	if h.restConfig != nil {
+		// check k8s minor version
+		k8sVer, err := k8sversion.GetKubernetesVersion(h.restConfig)
+		if err != nil {
+			scope.Errorf("failed to get k8s version: %s", err)
+		}
+		// There is a mutatingwebhook in gke that would corrupt the managedFields, which is fixed in k8s 1.18.
+		// See: https://github.com/kubernetes/kubernetes/issues/96351
+		if k8sVer >= 18 {
+			// todo(kebe7jun) a more general test method
+			// API Server does not support detecting whether ServerSideApply is enabled
+			// through the API for the time being.
+			ns, err := h.clientSet.CoreV1().Namespaces().Get(context.TODO(), constants.KubeSystemNamespace, v12.GetOptions{})
+			if err != nil {
+				scope.Warnf("failed to get namespace: %v", err)
+				return false
+			}
+			if ns.ManagedFields == nil {
+				scope.Infof("k8s support ServerSideApply but was manually disabled")
+				return false
+			}
+			return true
+		}
+	}
+	return false
+}
+
 // Delete resources associated with the custom resource instance
 func (h *HelmReconciler) Delete() error {
+	defer func() {
+		metrics.ReportOwnedResourceCounts()
+		h.reportPrunedObjectKind()
+	}()
 	iop := h.iop
 	if iop.Spec.Revision == "" {
-		return h.Prune(nil, true)
+		err := h.Prune(nil, true)
+		return err
 	}
 	// Delete IOP with revision:
 	// for this case we update the status field to pending if there are still proxies pointing to this revision
 	// and we do not prune shared resources, same effect as `istioctl uninstall --revision foo` command.
-	status, err := h.PruneControlPlaneByRevisionWithController(iop.Spec.Namespace, iop.Spec.Revision)
+	status, err := h.PruneControlPlaneByRevisionWithController(iop.Spec)
 	if err != nil {
 		return err
 	}
+
 	if err := h.SetStatusComplete(status); err != nil {
 		return err
 	}
@@ -345,6 +400,15 @@ func (h *HelmReconciler) getCoreOwnerLabels() (map[string]string, error) {
 	}
 	labels[istioVersionLabelStr] = version.Info.Version
 
+	revision := ""
+	if h.iop != nil {
+		revision = h.iop.Spec.Revision
+	}
+	if revision == "" {
+		revision = "default"
+	}
+	labels[label.IoIstioRev.Name] = revision
+
 	return labels, nil
 }
 
@@ -353,14 +417,6 @@ func (h *HelmReconciler) addComponentLabels(coreLabels map[string]string, compon
 	for k, v := range coreLabels {
 		labels[k] = v
 	}
-	revision := ""
-	if h.iop != nil {
-		revision = h.iop.Spec.Revision
-	}
-	if revision == "" {
-		revision = "default"
-	}
-	labels[label.IstioRev] = revision
 
 	labels[IstioComponentLabelStr] = componentName
 
@@ -437,4 +493,73 @@ func (h *HelmReconciler) getCRNamespace() (string, error) {
 // getClient returns the kubernetes client associated with this HelmReconciler
 func (h *HelmReconciler) getClient() client.Client {
 	return h.client
+}
+
+func (h *HelmReconciler) addPrunedKind(gk schema.GroupKind) {
+	h.countLock.Lock()
+	defer h.countLock.Unlock()
+	h.prunedKindSet[gk] = struct{}{}
+}
+
+func (h *HelmReconciler) reportPrunedObjectKind() {
+	h.countLock.Lock()
+	defer h.countLock.Unlock()
+	for gvk := range h.prunedKindSet {
+		metrics.ResourcePruneTotal.
+			With(metrics.ResourceKindLabel.Value(util.GKString(gvk))).
+			Increment()
+	}
+}
+
+// CreateNamespace creates a namespace using the given k8s interface.
+func CreateNamespace(cs kubernetes.Interface, namespace string, network string) error {
+	if namespace == "" {
+		// Setup default namespace
+		namespace = name.IstioDefaultNamespace
+	}
+	// check if the namespace already exists. If yes, do nothing. If no, create a new one.
+	_, err := cs.CoreV1().Namespaces().Get(context.TODO(), namespace, v12.GetOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			ns := &v1.Namespace{ObjectMeta: v12.ObjectMeta{
+				Name:   namespace,
+				Labels: map[string]string{},
+			}}
+			if network != "" {
+				ns.Labels[label.TopologyNetwork.Name] = network
+			}
+			_, err := cs.CoreV1().Namespaces().Create(context.TODO(), ns, v12.CreateOptions{})
+			if err != nil {
+				return fmt.Errorf("failed to create namespace %v: %v", namespace, err)
+			}
+		} else {
+			return fmt.Errorf("failed to check if namespace %v exists: %v", namespace, err)
+		}
+	}
+
+	return nil
+}
+
+// createNamespace creates a namespace using the given k8s client.
+func (h *HelmReconciler) createNamespace(namespace string, network string) error {
+	if h.opts.DryRun {
+		return nil
+	}
+	return CreateNamespace(h.clientSet, namespace, network)
+}
+
+func (h *HelmReconciler) networkName() string {
+	if h.iop == nil || h.iop.Spec == nil || h.iop.Spec.Values == nil {
+		return ""
+	}
+	globalI := h.iop.Spec.Values["global"]
+	global, ok := globalI.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	nw, ok := global["network"].(string)
+	if !ok {
+		return ""
+	}
+	return nw
 }

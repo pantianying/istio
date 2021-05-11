@@ -21,7 +21,6 @@ import (
 	"github.com/gogo/protobuf/proto"
 
 	"istio.io/api/mesh/v1alpha1"
-
 	"istio.io/istio/galley/pkg/config/mesh"
 	"istio.io/istio/galley/pkg/config/scope"
 	"istio.io/istio/pkg/config/event"
@@ -162,6 +161,9 @@ func (s *session) stop() {
 	case buffering, processing:
 		s.transitionTo(terminating)
 		terminate = true
+
+	case terminating:
+		scope.Processing.Warn("session stopped more than once")
 
 	default:
 		panic(fmt.Errorf("session.stop: Invalid state: %v", s.state))

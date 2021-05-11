@@ -15,11 +15,13 @@
 package multicluster
 
 import (
+	"fmt"
+
 	v1 "k8s.io/api/core/v1"
 
 	"istio.io/api/mesh/v1alpha1"
-
 	"istio.io/istio/galley/pkg/config/analysis"
+	"istio.io/istio/galley/pkg/config/analysis/analyzers/util"
 	"istio.io/istio/galley/pkg/config/analysis/msg"
 	"istio.io/istio/pilot/pkg/serviceregistry"
 	"istio.io/istio/pkg/config/resource"
@@ -33,15 +35,12 @@ type MeshNetworksAnalyzer struct{}
 
 var _ analysis.Analyzer = &MeshNetworksAnalyzer{}
 
-var (
-	// Service Registries that are known to istio.
-	serviceRegistries = []serviceregistry.ProviderID{
-		serviceregistry.Mock,
-		serviceregistry.Kubernetes,
-		serviceregistry.MCP,
-		serviceregistry.External,
-	}
-)
+// Service Registries that are known to istio.
+var serviceRegistries = []serviceregistry.ProviderID{
+	serviceregistry.Mock,
+	serviceregistry.Kubernetes,
+	serviceregistry.External,
+}
 
 // Metadata implements Analyzer
 func (s *MeshNetworksAnalyzer) Metadata() analysis.Metadata {
@@ -71,7 +70,7 @@ func (s *MeshNetworksAnalyzer) Analyze(c analysis.Context) {
 	c.ForEach(collections.IstioMeshV1Alpha1MeshNetworks.Name(), func(r *resource.Instance) bool {
 		mn := r.Message.(*v1alpha1.MeshNetworks)
 		for i, n := range mn.Networks {
-			for _, e := range n.Endpoints {
+			for j, e := range n.Endpoints {
 				switch re := e.Ne.(type) {
 				case *v1alpha1.Network_NetworkEndpoints_FromRegistry:
 					found := false
@@ -81,12 +80,17 @@ func (s *MeshNetworksAnalyzer) Analyze(c analysis.Context) {
 						}
 					}
 					if !found {
-						c.Report(collections.IstioMeshV1Alpha1MeshNetworks.Name(), msg.NewUnknownMeshNetworksServiceRegistry(r, re.FromRegistry, i))
+						m := msg.NewUnknownMeshNetworksServiceRegistry(r, re.FromRegistry, i)
+
+						if line, ok := util.ErrorLine(r, fmt.Sprintf(util.FromRegistry, i, j)); ok {
+							m.Line = line
+						}
+
+						c.Report(collections.IstioMeshV1Alpha1MeshNetworks.Name(), m)
 					}
 				}
 			}
 		}
 		return true
 	})
-
 }

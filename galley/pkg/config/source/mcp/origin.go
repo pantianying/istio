@@ -23,13 +23,19 @@ const (
 	defaultReference = reference("mcp")
 )
 
-var _ resource.Origin = defaultOrigin
-var _ resource.Reference = defaultReference
+var (
+	_ resource.Origin    = defaultOrigin
+	_ resource.Reference = defaultReference
+)
 
 type origin string
 
 func (o origin) FriendlyName() string {
 	return string(o)
+}
+
+func (o origin) Comparator() string {
+	return o.FriendlyName()
 }
 
 func (o origin) Namespace() resource.Namespace {
@@ -38,6 +44,10 @@ func (o origin) Namespace() resource.Namespace {
 
 func (o origin) Reference() resource.Reference {
 	return defaultReference
+}
+
+func (o origin) FieldMap() map[string]int {
+	return make(map[string]int)
 }
 
 type reference string

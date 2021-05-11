@@ -15,7 +15,6 @@
 package v1beta1
 
 import (
-	"os"
 	"reflect"
 	"testing"
 	"time"
@@ -26,20 +25,23 @@ import (
 	envoy_jwt "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/http/jwt_authn/v3"
 	http_conn "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tls "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
+	"github.com/golang/protobuf/proto"
 	"github.com/golang/protobuf/ptypes"
+	duration "github.com/golang/protobuf/ptypes/duration"
 	"github.com/golang/protobuf/ptypes/empty"
-
-	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	"github.com/google/go-cmp/cmp"
+	"google.golang.org/protobuf/testing/protocmp"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"istio.io/api/security/v1beta1"
 	type_beta "istio.io/api/type/v1beta1"
-
 	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/model/test"
-	"istio.io/istio/pilot/pkg/networking"
+	"istio.io/istio/pilot/pkg/networking/plugin"
 	pilotutil "istio.io/istio/pilot/pkg/networking/util"
-	xdsfilters "istio.io/istio/pilot/pkg/xds/filters"
+	"istio.io/istio/pkg/config"
+	"istio.io/istio/pkg/config/host"
 	authn_alpha "istio.io/istio/pkg/envoy/config/authentication/v1alpha1"
 	authn_filter "istio.io/istio/pkg/envoy/config/filter/http/authn/v2alpha1"
 	protovalue "istio.io/istio/pkg/proto"
@@ -54,18 +56,19 @@ func TestJwtFilter(t *testing.T) {
 	jwksURI := ms.URL + "/oauth2/v3/certs"
 
 	cases := []struct {
-		name     string
-		in       []*model.Config
-		expected *http_conn.HttpFilter
+		name             string
+		in               []*config.Config
+		enableRemoteJwks bool
+		expected         *http_conn.HttpFilter
 	}{
 		{
 			name:     "No policy",
-			in:       []*model.Config{},
+			in:       []*config.Config{},
 			expected: nil,
 		},
 		{
 			name: "Empty policy",
-			in: []*model.Config{
+			in: []*config.Config{
 				{
 					Spec: &v1beta1.RequestAuthentication{},
 				},
@@ -74,7 +77,7 @@ func TestJwtFilter(t *testing.T) {
 		},
 		{
 			name: "Single JWT policy",
-			in: []*model.Config{
+			in: []*config.Config{
 				{
 					Spec: &v1beta1.RequestAuthentication{
 						JwtRules: []*v1beta1.JWTRule{
@@ -98,18 +101,20 @@ func TestJwtFilter(t *testing.T) {
 											Prefix: "/",
 										},
 									},
-									Requires: &envoy_jwt.JwtRequirement{
-										RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
-											RequiresAny: &envoy_jwt.JwtRequirementOrList{
-												Requirements: []*envoy_jwt.JwtRequirement{
-													{
-														RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
-															ProviderName: "origins-0",
+									RequirementType: &envoy_jwt.RequirementRule_Requires{
+										Requires: &envoy_jwt.JwtRequirement{
+											RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
+												RequiresAny: &envoy_jwt.JwtRequirementOrList{
+													Requirements: []*envoy_jwt.JwtRequirement{
+														{
+															RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
+																ProviderName: "origins-0",
+															},
 														},
-													},
-													{
-														RequiresType: &envoy_jwt.JwtRequirement_AllowMissing{
-															AllowMissing: &empty.Empty{},
+														{
+															RequiresType: &envoy_jwt.JwtRequirement_AllowMissing{
+																AllowMissing: &empty.Empty{},
+															},
 														},
 													},
 												},
@@ -137,8 +142,147 @@ func TestJwtFilter(t *testing.T) {
 			},
 		},
 		{
+			name: "JWT policy with Mesh cluster as issuer and remote jwks enabled",
+			in: []*config.Config{
+				{
+					Spec: &v1beta1.RequestAuthentication{
+						JwtRules: []*v1beta1.JWTRule{
+							{
+								Issuer:  "mesh cluster",
+								JwksUri: "http://jwt-token-issuer.mesh:7443/jwks",
+							},
+						},
+					},
+				},
+			},
+			enableRemoteJwks: true,
+			expected: &http_conn.HttpFilter{
+				Name: "envoy.filters.http.jwt_authn",
+				ConfigType: &http_conn.HttpFilter_TypedConfig{
+					TypedConfig: pilotutil.MessageToAny(
+						&envoy_jwt.JwtAuthentication{
+							Rules: []*envoy_jwt.RequirementRule{
+								{
+									Match: &route.RouteMatch{
+										PathSpecifier: &route.RouteMatch_Prefix{
+											Prefix: "/",
+										},
+									},
+									RequirementType: &envoy_jwt.RequirementRule_Requires{
+										Requires: &envoy_jwt.JwtRequirement{
+											RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
+												RequiresAny: &envoy_jwt.JwtRequirementOrList{
+													Requirements: []*envoy_jwt.JwtRequirement{
+														{
+															RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
+																ProviderName: "origins-0",
+															},
+														},
+														{
+															RequiresType: &envoy_jwt.JwtRequirement_AllowMissing{
+																AllowMissing: &empty.Empty{},
+															},
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+							Providers: map[string]*envoy_jwt.JwtProvider{
+								"origins-0": {
+									Issuer: "mesh cluster",
+									JwksSourceSpecifier: &envoy_jwt.JwtProvider_RemoteJwks{
+										RemoteJwks: &envoy_jwt.RemoteJwks{
+											HttpUri: &core.HttpUri{
+												Uri: "http://jwt-token-issuer.mesh:7443/jwks",
+												HttpUpstreamType: &core.HttpUri_Cluster{
+													Cluster: "outbound|7443||jwt-token-issuer.mesh.svc.cluster.local",
+												},
+												Timeout: &duration.Duration{Seconds: 5},
+											},
+											CacheDuration: &duration.Duration{Seconds: 5 * 60},
+										},
+									},
+									Forward:           false,
+									PayloadInMetadata: "mesh cluster",
+								},
+							},
+						}),
+				},
+			},
+		},
+		{
+			name: "JWT policy with non Mesh cluster as issuer and remote jwks enabled",
+			in: []*config.Config{
+				{
+					Spec: &v1beta1.RequestAuthentication{
+						JwtRules: []*v1beta1.JWTRule{
+							{
+								Issuer:  "invalid|7443|",
+								JwksUri: jwksURI,
+							},
+						},
+					},
+				},
+			},
+			enableRemoteJwks: true,
+			expected: &http_conn.HttpFilter{
+				Name: "envoy.filters.http.jwt_authn",
+				ConfigType: &http_conn.HttpFilter_TypedConfig{
+					TypedConfig: pilotutil.MessageToAny(
+						&envoy_jwt.JwtAuthentication{
+							Rules: []*envoy_jwt.RequirementRule{
+								{
+									Match: &route.RouteMatch{
+										PathSpecifier: &route.RouteMatch_Prefix{
+											Prefix: "/",
+										},
+									},
+									RequirementType: &envoy_jwt.RequirementRule_Requires{
+										Requires: &envoy_jwt.JwtRequirement{
+											RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
+												RequiresAny: &envoy_jwt.JwtRequirementOrList{
+													Requirements: []*envoy_jwt.JwtRequirement{
+														{
+															RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
+																ProviderName: "origins-0",
+															},
+														},
+														{
+															RequiresType: &envoy_jwt.JwtRequirement_AllowMissing{
+																AllowMissing: &empty.Empty{},
+															},
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+							Providers: map[string]*envoy_jwt.JwtProvider{
+								"origins-0": {
+									Issuer: "invalid|7443|",
+									JwksSourceSpecifier: &envoy_jwt.JwtProvider_LocalJwks{
+										LocalJwks: &core.DataSource{
+											Specifier: &core.DataSource_InlineString{
+												InlineString: test.JwtPubKey2,
+											},
+										},
+									},
+									Forward:           false,
+									PayloadInMetadata: "invalid|7443|",
+								},
+							},
+						}),
+				},
+			},
+		},
+		{
 			name: "Multi JWTs policy",
-			in: []*model.Config{
+			in: []*config.Config{
 				{
 					Spec: &v1beta1.RequestAuthentication{
 						JwtRules: []*v1beta1.JWTRule{
@@ -175,54 +319,56 @@ func TestJwtFilter(t *testing.T) {
 											Prefix: "/",
 										},
 									},
-									Requires: &envoy_jwt.JwtRequirement{
-										RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
-											RequiresAny: &envoy_jwt.JwtRequirementOrList{
-												Requirements: []*envoy_jwt.JwtRequirement{
-													{
-														RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
-															ProviderName: "origins-0",
+									RequirementType: &envoy_jwt.RequirementRule_Requires{
+										Requires: &envoy_jwt.JwtRequirement{
+											RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
+												RequiresAny: &envoy_jwt.JwtRequirementOrList{
+													Requirements: []*envoy_jwt.JwtRequirement{
+														{
+															RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
+																ProviderName: "origins-0",
+															},
 														},
-													},
-													{
-														RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
-															ProviderName: "origins-1",
+														{
+															RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
+																ProviderName: "origins-1",
+															},
 														},
-													},
-													{
-														RequiresType: &envoy_jwt.JwtRequirement_RequiresAll{
-															RequiresAll: &envoy_jwt.JwtRequirementAndList{
-																Requirements: []*envoy_jwt.JwtRequirement{
-																	{
-																		RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
-																			RequiresAny: &envoy_jwt.JwtRequirementOrList{
-																				Requirements: []*envoy_jwt.JwtRequirement{
-																					{
-																						RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
-																							ProviderName: "origins-0",
+														{
+															RequiresType: &envoy_jwt.JwtRequirement_RequiresAll{
+																RequiresAll: &envoy_jwt.JwtRequirementAndList{
+																	Requirements: []*envoy_jwt.JwtRequirement{
+																		{
+																			RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
+																				RequiresAny: &envoy_jwt.JwtRequirementOrList{
+																					Requirements: []*envoy_jwt.JwtRequirement{
+																						{
+																							RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
+																								ProviderName: "origins-0",
+																							},
 																						},
-																					},
-																					{
-																						RequiresType: &envoy_jwt.JwtRequirement_AllowMissing{
-																							AllowMissing: &empty.Empty{},
+																						{
+																							RequiresType: &envoy_jwt.JwtRequirement_AllowMissing{
+																								AllowMissing: &empty.Empty{},
+																							},
 																						},
 																					},
 																				},
 																			},
 																		},
-																	},
-																	{
-																		RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
-																			RequiresAny: &envoy_jwt.JwtRequirementOrList{
-																				Requirements: []*envoy_jwt.JwtRequirement{
-																					{
-																						RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
-																							ProviderName: "origins-1",
+																		{
+																			RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
+																				RequiresAny: &envoy_jwt.JwtRequirementOrList{
+																					Requirements: []*envoy_jwt.JwtRequirement{
+																						{
+																							RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
+																								ProviderName: "origins-1",
+																							},
 																						},
-																					},
-																					{
-																						RequiresType: &envoy_jwt.JwtRequirement_AllowMissing{
-																							AllowMissing: &empty.Empty{},
+																						{
+																							RequiresType: &envoy_jwt.JwtRequirement_AllowMissing{
+																								AllowMissing: &empty.Empty{},
+																							},
 																						},
 																					},
 																				},
@@ -271,7 +417,7 @@ func TestJwtFilter(t *testing.T) {
 		},
 		{
 			name: "JWT policy with inline Jwks",
-			in: []*model.Config{
+			in: []*config.Config{
 				{
 					Spec: &v1beta1.RequestAuthentication{
 						JwtRules: []*v1beta1.JWTRule{
@@ -295,18 +441,20 @@ func TestJwtFilter(t *testing.T) {
 											Prefix: "/",
 										},
 									},
-									Requires: &envoy_jwt.JwtRequirement{
-										RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
-											RequiresAny: &envoy_jwt.JwtRequirementOrList{
-												Requirements: []*envoy_jwt.JwtRequirement{
-													{
-														RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
-															ProviderName: "origins-0",
+									RequirementType: &envoy_jwt.RequirementRule_Requires{
+										Requires: &envoy_jwt.JwtRequirement{
+											RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
+												RequiresAny: &envoy_jwt.JwtRequirementOrList{
+													Requirements: []*envoy_jwt.JwtRequirement{
+														{
+															RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
+																ProviderName: "origins-0",
+															},
 														},
-													},
-													{
-														RequiresType: &envoy_jwt.JwtRequirement_AllowMissing{
-															AllowMissing: &empty.Empty{},
+														{
+															RequiresType: &envoy_jwt.JwtRequirement_AllowMissing{
+																AllowMissing: &empty.Empty{},
+															},
 														},
 													},
 												},
@@ -335,7 +483,7 @@ func TestJwtFilter(t *testing.T) {
 		},
 		{
 			name: "JWT policy with bad Jwks URI",
-			in: []*model.Config{
+			in: []*config.Config{
 				{
 					Spec: &v1beta1.RequestAuthentication{
 						JwtRules: []*v1beta1.JWTRule{
@@ -359,18 +507,20 @@ func TestJwtFilter(t *testing.T) {
 											Prefix: "/",
 										},
 									},
-									Requires: &envoy_jwt.JwtRequirement{
-										RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
-											RequiresAny: &envoy_jwt.JwtRequirementOrList{
-												Requirements: []*envoy_jwt.JwtRequirement{
-													{
-														RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
-															ProviderName: "origins-0",
+									RequirementType: &envoy_jwt.RequirementRule_Requires{
+										Requires: &envoy_jwt.JwtRequirement{
+											RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
+												RequiresAny: &envoy_jwt.JwtRequirementOrList{
+													Requirements: []*envoy_jwt.JwtRequirement{
+														{
+															RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
+																ProviderName: "origins-0",
+															},
 														},
-													},
-													{
-														RequiresType: &envoy_jwt.JwtRequirement_AllowMissing{
-															AllowMissing: &empty.Empty{},
+														{
+															RequiresType: &envoy_jwt.JwtRequirement_AllowMissing{
+																AllowMissing: &empty.Empty{},
+															},
 														},
 													},
 												},
@@ -385,7 +535,7 @@ func TestJwtFilter(t *testing.T) {
 									JwksSourceSpecifier: &envoy_jwt.JwtProvider_LocalJwks{
 										LocalJwks: &core.DataSource{
 											Specifier: &core.DataSource_InlineString{
-												InlineString: createFakeJwks("http://site.not.exist"),
+												InlineString: model.CreateFakeJwks("http://site.not.exist"),
 											},
 										},
 									},
@@ -399,7 +549,7 @@ func TestJwtFilter(t *testing.T) {
 		},
 		{
 			name: "Forward original token",
-			in: []*model.Config{
+			in: []*config.Config{
 				{
 					Spec: &v1beta1.RequestAuthentication{
 						JwtRules: []*v1beta1.JWTRule{
@@ -424,18 +574,20 @@ func TestJwtFilter(t *testing.T) {
 											Prefix: "/",
 										},
 									},
-									Requires: &envoy_jwt.JwtRequirement{
-										RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
-											RequiresAny: &envoy_jwt.JwtRequirementOrList{
-												Requirements: []*envoy_jwt.JwtRequirement{
-													{
-														RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
-															ProviderName: "origins-0",
+									RequirementType: &envoy_jwt.RequirementRule_Requires{
+										Requires: &envoy_jwt.JwtRequirement{
+											RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
+												RequiresAny: &envoy_jwt.JwtRequirementOrList{
+													Requirements: []*envoy_jwt.JwtRequirement{
+														{
+															RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
+																ProviderName: "origins-0",
+															},
 														},
-													},
-													{
-														RequiresType: &envoy_jwt.JwtRequirement_AllowMissing{
-															AllowMissing: &empty.Empty{},
+														{
+															RequiresType: &envoy_jwt.JwtRequirement_AllowMissing{
+																AllowMissing: &empty.Empty{},
+															},
 														},
 													},
 												},
@@ -464,7 +616,7 @@ func TestJwtFilter(t *testing.T) {
 		},
 		{
 			name: "Output payload",
-			in: []*model.Config{
+			in: []*config.Config{
 				{
 					Spec: &v1beta1.RequestAuthentication{
 						JwtRules: []*v1beta1.JWTRule{
@@ -490,18 +642,20 @@ func TestJwtFilter(t *testing.T) {
 											Prefix: "/",
 										},
 									},
-									Requires: &envoy_jwt.JwtRequirement{
-										RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
-											RequiresAny: &envoy_jwt.JwtRequirementOrList{
-												Requirements: []*envoy_jwt.JwtRequirement{
-													{
-														RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
-															ProviderName: "origins-0",
+									RequirementType: &envoy_jwt.RequirementRule_Requires{
+										Requires: &envoy_jwt.JwtRequirement{
+											RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
+												RequiresAny: &envoy_jwt.JwtRequirementOrList{
+													Requirements: []*envoy_jwt.JwtRequirement{
+														{
+															RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
+																ProviderName: "origins-0",
+															},
 														},
-													},
-													{
-														RequiresType: &envoy_jwt.JwtRequirement_AllowMissing{
-															AllowMissing: &empty.Empty{},
+														{
+															RequiresType: &envoy_jwt.JwtRequirement_AllowMissing{
+																AllowMissing: &empty.Empty{},
+															},
 														},
 													},
 												},
@@ -531,9 +685,22 @@ func TestJwtFilter(t *testing.T) {
 		},
 	}
 
+	push := model.NewPushContext()
+	push.JwtKeyResolver = model.NewJwksResolver(
+		model.JwtPubKeyEvictionDuration, model.JwtPubKeyRefreshInterval,
+		model.JwtPubKeyRefreshIntervalOnFailure, model.JwtPubKeyRetryInterval)
+	defer push.JwtKeyResolver.Close()
+
+	push.ServiceIndex.HostnameAndNamespace[host.Name("jwt-token-issuer.mesh")] = map[string]*model.Service{}
+	push.ServiceIndex.HostnameAndNamespace[host.Name("jwt-token-issuer.mesh")]["mesh"] = &model.Service{
+		Hostname: host.Name("jwt-token-issuer.mesh.svc.cluster.local"),
+	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := NewPolicyApplier("root-namespace", c.in, nil).JwtFilter(); !reflect.DeepEqual(c.expected, got) {
+			defaultValue := features.EnableRemoteJwks
+			features.EnableRemoteJwks = c.enableRemoteJwks
+			defer func() { features.EnableRemoteJwks = defaultValue }()
+			if got := NewPolicyApplier("root-namespace", c.in, nil, push).JwtFilter(); !reflect.DeepEqual(c.expected, got) {
 				t.Errorf("got:\n%s\nwanted:\n%s", spew.Sdump(got), spew.Sdump(c.expected))
 			}
 		})
@@ -574,18 +741,20 @@ func TestConvertToEnvoyJwtConfig(t *testing.T) {
 								Prefix: "/",
 							},
 						},
-						Requires: &envoy_jwt.JwtRequirement{
-							RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
-								RequiresAny: &envoy_jwt.JwtRequirementOrList{
-									Requirements: []*envoy_jwt.JwtRequirement{
-										{
-											RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
-												ProviderName: "origins-0",
+						RequirementType: &envoy_jwt.RequirementRule_Requires{
+							Requires: &envoy_jwt.JwtRequirement{
+								RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
+									RequiresAny: &envoy_jwt.JwtRequirementOrList{
+										Requirements: []*envoy_jwt.JwtRequirement{
+											{
+												RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
+													ProviderName: "origins-0",
+												},
 											},
-										},
-										{
-											RequiresType: &envoy_jwt.JwtRequirement_AllowMissing{
-												AllowMissing: &empty.Empty{},
+											{
+												RequiresType: &envoy_jwt.JwtRequirement_AllowMissing{
+													AllowMissing: &empty.Empty{},
+												},
 											},
 										},
 									},
@@ -630,54 +799,56 @@ func TestConvertToEnvoyJwtConfig(t *testing.T) {
 								Prefix: "/",
 							},
 						},
-						Requires: &envoy_jwt.JwtRequirement{
-							RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
-								RequiresAny: &envoy_jwt.JwtRequirementOrList{
-									Requirements: []*envoy_jwt.JwtRequirement{
-										{
-											RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
-												ProviderName: "origins-0",
+						RequirementType: &envoy_jwt.RequirementRule_Requires{
+							Requires: &envoy_jwt.JwtRequirement{
+								RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
+									RequiresAny: &envoy_jwt.JwtRequirementOrList{
+										Requirements: []*envoy_jwt.JwtRequirement{
+											{
+												RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
+													ProviderName: "origins-0",
+												},
 											},
-										},
-										{
-											RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
-												ProviderName: "origins-1",
+											{
+												RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
+													ProviderName: "origins-1",
+												},
 											},
-										},
-										{
-											RequiresType: &envoy_jwt.JwtRequirement_RequiresAll{
-												RequiresAll: &envoy_jwt.JwtRequirementAndList{
-													Requirements: []*envoy_jwt.JwtRequirement{
-														{
-															RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
-																RequiresAny: &envoy_jwt.JwtRequirementOrList{
-																	Requirements: []*envoy_jwt.JwtRequirement{
-																		{
-																			RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
-																				ProviderName: "origins-0",
+											{
+												RequiresType: &envoy_jwt.JwtRequirement_RequiresAll{
+													RequiresAll: &envoy_jwt.JwtRequirementAndList{
+														Requirements: []*envoy_jwt.JwtRequirement{
+															{
+																RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
+																	RequiresAny: &envoy_jwt.JwtRequirementOrList{
+																		Requirements: []*envoy_jwt.JwtRequirement{
+																			{
+																				RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
+																					ProviderName: "origins-0",
+																				},
 																			},
-																		},
-																		{
-																			RequiresType: &envoy_jwt.JwtRequirement_AllowMissing{
-																				AllowMissing: &empty.Empty{},
+																			{
+																				RequiresType: &envoy_jwt.JwtRequirement_AllowMissing{
+																					AllowMissing: &empty.Empty{},
+																				},
 																			},
 																		},
 																	},
 																},
 															},
-														},
-														{
-															RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
-																RequiresAny: &envoy_jwt.JwtRequirementOrList{
-																	Requirements: []*envoy_jwt.JwtRequirement{
-																		{
-																			RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
-																				ProviderName: "origins-1",
+															{
+																RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
+																	RequiresAny: &envoy_jwt.JwtRequirementOrList{
+																		Requirements: []*envoy_jwt.JwtRequirement{
+																			{
+																				RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
+																					ProviderName: "origins-1",
+																				},
 																			},
-																		},
-																		{
-																			RequiresType: &envoy_jwt.JwtRequirement_AllowMissing{
-																				AllowMissing: &empty.Empty{},
+																			{
+																				RequiresType: &envoy_jwt.JwtRequirement_AllowMissing{
+																					AllowMissing: &empty.Empty{},
+																				},
 																			},
 																		},
 																	},
@@ -737,18 +908,20 @@ func TestConvertToEnvoyJwtConfig(t *testing.T) {
 								Prefix: "/",
 							},
 						},
-						Requires: &envoy_jwt.JwtRequirement{
-							RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
-								RequiresAny: &envoy_jwt.JwtRequirementOrList{
-									Requirements: []*envoy_jwt.JwtRequirement{
-										{
-											RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
-												ProviderName: "origins-0",
+						RequirementType: &envoy_jwt.RequirementRule_Requires{
+							Requires: &envoy_jwt.JwtRequirement{
+								RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
+									RequiresAny: &envoy_jwt.JwtRequirementOrList{
+										Requirements: []*envoy_jwt.JwtRequirement{
+											{
+												RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
+													ProviderName: "origins-0",
+												},
 											},
-										},
-										{
-											RequiresType: &envoy_jwt.JwtRequirement_AllowMissing{
-												AllowMissing: &empty.Empty{},
+											{
+												RequiresType: &envoy_jwt.JwtRequirement_AllowMissing{
+													AllowMissing: &empty.Empty{},
+												},
 											},
 										},
 									},
@@ -763,7 +936,7 @@ func TestConvertToEnvoyJwtConfig(t *testing.T) {
 						JwksSourceSpecifier: &envoy_jwt.JwtProvider_LocalJwks{
 							LocalJwks: &core.DataSource{
 								Specifier: &core.DataSource_InlineString{
-									InlineString: createFakeJwks(""),
+									InlineString: model.CreateFakeJwks(""),
 								},
 							},
 						},
@@ -789,18 +962,20 @@ func TestConvertToEnvoyJwtConfig(t *testing.T) {
 								Prefix: "/",
 							},
 						},
-						Requires: &envoy_jwt.JwtRequirement{
-							RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
-								RequiresAny: &envoy_jwt.JwtRequirementOrList{
-									Requirements: []*envoy_jwt.JwtRequirement{
-										{
-											RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
-												ProviderName: "origins-0",
+						RequirementType: &envoy_jwt.RequirementRule_Requires{
+							Requires: &envoy_jwt.JwtRequirement{
+								RequiresType: &envoy_jwt.JwtRequirement_RequiresAny{
+									RequiresAny: &envoy_jwt.JwtRequirementOrList{
+										Requirements: []*envoy_jwt.JwtRequirement{
+											{
+												RequiresType: &envoy_jwt.JwtRequirement_ProviderName{
+													ProviderName: "origins-0",
+												},
 											},
-										},
-										{
-											RequiresType: &envoy_jwt.JwtRequirement_AllowMissing{
-												AllowMissing: &empty.Empty{},
+											{
+												RequiresType: &envoy_jwt.JwtRequirement_AllowMissing{
+													AllowMissing: &empty.Empty{},
+												},
 											},
 										},
 									},
@@ -815,7 +990,7 @@ func TestConvertToEnvoyJwtConfig(t *testing.T) {
 						JwksSourceSpecifier: &envoy_jwt.JwtProvider_LocalJwks{
 							LocalJwks: &core.DataSource{
 								Specifier: &core.DataSource_InlineString{
-									InlineString: createFakeJwks("http://site.not.exist"),
+									InlineString: model.CreateFakeJwks("http://site.not.exist"),
 								},
 							},
 						},
@@ -827,19 +1002,18 @@ func TestConvertToEnvoyJwtConfig(t *testing.T) {
 		},
 	}
 
+	push := &model.PushContext{}
+	push.JwtKeyResolver = model.NewJwksResolver(
+		model.JwtPubKeyEvictionDuration, model.JwtPubKeyRefreshInterval,
+		model.JwtPubKeyRefreshIntervalOnFailure, model.JwtPubKeyRetryInterval)
+	defer push.JwtKeyResolver.Close()
+
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := convertToEnvoyJwtConfig(c.in); !reflect.DeepEqual(c.expected, got) {
+			if got := convertToEnvoyJwtConfig(c.in, push); !reflect.DeepEqual(c.expected, got) {
 				t.Errorf("got:\n%s\nwanted:\n%s\n", spew.Sdump(got), spew.Sdump(c.expected))
 			}
 		})
-	}
-}
-
-func setSkipValidateTrustDomain(value string, t *testing.T) {
-	err := os.Setenv(features.SkipValidateTrustDomain.Name, value)
-	if err != nil {
-		t.Fatalf("failed to set SkipValidateTrustDomain: %v", err)
 	}
 }
 
@@ -848,6 +1022,7 @@ func humanReadableAuthnFilterDump(filter *http_conn.HttpFilter) string {
 		return "<nil>"
 	}
 	config := &authn_filter.FilterConfig{}
+	// nolint: staticcheck
 	ptypes.UnmarshalAny(filter.GetTypedConfig(), config)
 	return spew.Sdump(*config)
 }
@@ -863,9 +1038,8 @@ func TestAuthnFilterConfig(t *testing.T) {
 		name                         string
 		isGateway                    bool
 		gatewayServerUsesIstioMutual bool
-		skipTrustDomainValidate      bool
-		jwtIn                        []*model.Config
-		peerIn                       []*model.Config
+		jwtIn                        []*config.Config
+		peerIn                       []*config.Config
 		expected                     *http_conn.HttpFilter
 	}{
 		{
@@ -885,6 +1059,7 @@ func TestAuthnFilterConfig(t *testing.T) {
 								},
 							},
 						},
+						SkipValidateTrustDomain: true,
 					}),
 				},
 			},
@@ -919,8 +1094,7 @@ func TestAuthnFilterConfig(t *testing.T) {
 			},
 		},
 		{
-			name:                    "no-request-authn-rule-skip-trust-domain",
-			skipTrustDomainValidate: true,
+			name: "no-request-authn-rule-skip-trust-domain",
 			expected: &http_conn.HttpFilter{
 				Name: "istio_authn",
 				ConfigType: &http_conn.HttpFilter_TypedConfig{
@@ -943,7 +1117,7 @@ func TestAuthnFilterConfig(t *testing.T) {
 		},
 		{
 			name: "beta-jwt",
-			jwtIn: []*model.Config{
+			jwtIn: []*config.Config{
 				{
 					Spec: &v1beta1.RequestAuthentication{
 						JwtRules: []*v1beta1.JWTRule{
@@ -979,6 +1153,7 @@ func TestAuthnFilterConfig(t *testing.T) {
 							OriginIsOptional: true,
 							PrincipalBinding: authn_alpha.PrincipalBinding_USE_ORIGIN,
 						},
+						SkipValidateTrustDomain: true,
 					}),
 				},
 			},
@@ -986,7 +1161,7 @@ func TestAuthnFilterConfig(t *testing.T) {
 		{
 			name:      "beta-jwt-for-gateway",
 			isGateway: true,
-			jwtIn: []*model.Config{
+			jwtIn: []*config.Config{
 				{
 					Spec: &v1beta1.RequestAuthentication{
 						JwtRules: []*v1beta1.JWTRule{
@@ -1013,6 +1188,7 @@ func TestAuthnFilterConfig(t *testing.T) {
 							OriginIsOptional: true,
 							PrincipalBinding: authn_alpha.PrincipalBinding_USE_ORIGIN,
 						},
+						SkipValidateTrustDomain: true,
 					}),
 				},
 			},
@@ -1021,7 +1197,7 @@ func TestAuthnFilterConfig(t *testing.T) {
 			name:                         "beta-jwt-for-gateway-with-istio-mutual",
 			isGateway:                    true,
 			gatewayServerUsesIstioMutual: true,
-			jwtIn: []*model.Config{
+			jwtIn: []*config.Config{
 				{
 					Spec: &v1beta1.RequestAuthentication{
 						JwtRules: []*v1beta1.JWTRule{
@@ -1064,7 +1240,7 @@ func TestAuthnFilterConfig(t *testing.T) {
 		},
 		{
 			name: "multi-beta-jwt",
-			jwtIn: []*model.Config{
+			jwtIn: []*config.Config{
 				{
 					Spec: &v1beta1.RequestAuthentication{
 						JwtRules: []*v1beta1.JWTRule{
@@ -1118,13 +1294,14 @@ func TestAuthnFilterConfig(t *testing.T) {
 							OriginIsOptional: true,
 							PrincipalBinding: authn_alpha.PrincipalBinding_USE_ORIGIN,
 						},
+						SkipValidateTrustDomain: true,
 					}),
 				},
 			},
 		},
 		{
 			name: "multi-beta-jwt-sort-by-issuer-again",
-			jwtIn: []*model.Config{
+			jwtIn: []*config.Config{
 				{
 					Spec: &v1beta1.RequestAuthentication{
 						JwtRules: []*v1beta1.JWTRule{
@@ -1178,13 +1355,14 @@ func TestAuthnFilterConfig(t *testing.T) {
 							OriginIsOptional: true,
 							PrincipalBinding: authn_alpha.PrincipalBinding_USE_ORIGIN,
 						},
+						SkipValidateTrustDomain: true,
 					}),
 				},
 			},
 		},
 		{
 			name: "beta-mtls",
-			peerIn: []*model.Config{
+			peerIn: []*config.Config{
 				{
 					Spec: &v1beta1.PeerAuthentication{
 						Mtls: &v1beta1.PeerAuthentication_MutualTLS{
@@ -1208,14 +1386,28 @@ func TestAuthnFilterConfig(t *testing.T) {
 								},
 							},
 						},
+						SkipValidateTrustDomain: true,
 					}),
 				},
 			},
 		},
 		{
+			name: "beta-mtls-disable",
+			peerIn: []*config.Config{
+				{
+					Spec: &v1beta1.PeerAuthentication{
+						Mtls: &v1beta1.PeerAuthentication_MutualTLS{
+							Mode: v1beta1.PeerAuthentication_MutualTLS_DISABLE,
+						},
+					},
+				},
+			},
+			expected: nil,
+		},
+		{
 			name:      "beta-mtls-for-gateway-does-not-respect-mtls-configs",
 			isGateway: true,
-			peerIn: []*model.Config{
+			peerIn: []*config.Config{
 				{
 					Spec: &v1beta1.PeerAuthentication{
 						Mtls: &v1beta1.PeerAuthentication_MutualTLS{
@@ -1227,9 +1419,8 @@ func TestAuthnFilterConfig(t *testing.T) {
 			expected: nil,
 		},
 		{
-			name:                    "beta-mtls-skip-trust-domain",
-			skipTrustDomainValidate: true,
-			peerIn: []*model.Config{
+			name: "beta-mtls-skip-trust-domain",
+			peerIn: []*config.Config{
 				{
 					Spec: &v1beta1.PeerAuthentication{
 						Mtls: &v1beta1.PeerAuthentication_MutualTLS{
@@ -1261,17 +1452,11 @@ func TestAuthnFilterConfig(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if c.skipTrustDomainValidate {
-				setSkipValidateTrustDomain("true", t)
-				defer func() {
-					setSkipValidateTrustDomain("false", t)
-				}()
-			}
 			proxyType := model.SidecarProxy
 			if c.isGateway {
 				proxyType = model.Router
 			}
-			got := NewPolicyApplier("root-namespace", c.jwtIn, c.peerIn).AuthNFilter(proxyType, 80, c.gatewayServerUsesIstioMutual)
+			got := NewPolicyApplier("root-namespace", c.jwtIn, c.peerIn, &model.PushContext{}).AuthNFilter(proxyType, 80, c.gatewayServerUsesIstioMutual)
 			if !reflect.DeepEqual(c.expected, got) {
 				t.Errorf("got:\n%v\nwanted:\n%v\n", humanReadableAuthnFilterDump(got), humanReadableAuthnFilterDump(c.expected))
 			}
@@ -1279,65 +1464,94 @@ func TestAuthnFilterConfig(t *testing.T) {
 	}
 }
 
-func TestOnInboundFilterChain(t *testing.T) {
+func TestInboundMTLSSettings(t *testing.T) {
 	now := time.Now()
 	tlsContext := &tls.DownstreamTlsContext{
 		CommonTlsContext: &tls.CommonTlsContext{
-			TlsCertificates: []*tls.TlsCertificate{
+			TlsCertificateSdsSecretConfigs: []*tls.SdsSecretConfig{
 				{
-					CertificateChain: &core.DataSource{
-						Specifier: &core.DataSource_Filename{
-							Filename: "/etc/certs/cert-chain.pem",
+					Name: "default",
+					SdsConfig: &core.ConfigSource{
+						ConfigSourceSpecifier: &core.ConfigSource_ApiConfigSource{
+							ApiConfigSource: &core.ApiConfigSource{
+								ApiType:                   core.ApiConfigSource_GRPC,
+								SetNodeOnFirstMessageOnly: true,
+								TransportApiVersion:       core.ApiVersion_V3,
+								GrpcServices: []*core.GrpcService{
+									{
+										TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
+											EnvoyGrpc: &core.GrpcService_EnvoyGrpc{ClusterName: "sds-grpc"},
+										},
+									},
+								},
+							},
 						},
-					},
-					PrivateKey: &core.DataSource{
-						Specifier: &core.DataSource_Filename{
-							Filename: "/etc/certs/key.pem",
-						},
+						InitialFetchTimeout: durationpb.New(time.Second * 0),
+						ResourceApiVersion:  core.ApiVersion_V3,
 					},
 				},
 			},
-			ValidationContextType: &tls.CommonTlsContext_ValidationContext{
-				ValidationContext: &tls.CertificateValidationContext{
-					TrustedCa: &core.DataSource{
-						Specifier: &core.DataSource_Filename{
-							Filename: "/etc/certs/root-cert.pem",
+			ValidationContextType: &tls.CommonTlsContext_CombinedValidationContext{
+				CombinedValidationContext: &tls.CommonTlsContext_CombinedCertificateValidationContext{
+					DefaultValidationContext: &tls.CertificateValidationContext{},
+					ValidationContextSdsSecretConfig: &tls.SdsSecretConfig{
+						Name: "ROOTCA",
+						SdsConfig: &core.ConfigSource{
+							ConfigSourceSpecifier: &core.ConfigSource_ApiConfigSource{
+								ApiConfigSource: &core.ApiConfigSource{
+									ApiType:                   core.ApiConfigSource_GRPC,
+									SetNodeOnFirstMessageOnly: true,
+									TransportApiVersion:       core.ApiVersion_V3,
+									GrpcServices: []*core.GrpcService{
+										{
+											TargetSpecifier: &core.GrpcService_EnvoyGrpc_{
+												EnvoyGrpc: &core.GrpcService_EnvoyGrpc{ClusterName: "sds-grpc"},
+											},
+										},
+									},
+								},
+							},
+							InitialFetchTimeout: durationpb.New(time.Second * 0),
+							ResourceApiVersion:  core.ApiVersion_V3,
 						},
 					},
 				},
 			},
 			AlpnProtocols: []string{"istio-peer-exchange", "h2", "http/1.1"},
+			TlsParams: &tls.TlsParameters{
+				TlsMinimumProtocolVersion: tls.TlsParameters_TLSv1_2,
+				CipherSuites: []string{
+					"ECDHE-ECDSA-AES256-GCM-SHA384",
+					"ECDHE-RSA-AES256-GCM-SHA384",
+					"ECDHE-ECDSA-AES128-GCM-SHA256",
+					"ECDHE-RSA-AES128-GCM-SHA256",
+					"AES256-GCM-SHA384",
+					"AES128-GCM-SHA256",
+				},
+			},
 		},
 		RequireClientCertificate: protovalue.BoolTrue,
 	}
+	tlsContextHTTP := proto.Clone(tlsContext).(*tls.DownstreamTlsContext)
+	tlsContextHTTP.CommonTlsContext.AlpnProtocols = []string{"h2", "http/1.1"}
 
-	expectedStrict := []networking.FilterChain{
-		{
-			TLSContext: tlsContext,
-		},
+	expectedStrict := plugin.MTLSSettings{
+		Port: 8080,
+		Mode: model.MTLSStrict,
+		TCP:  tlsContext,
+		HTTP: tlsContextHTTP,
 	}
-
-	// Two filter chains, one for mtls traffic within the mesh, one for plain text traffic.
-	expectedPermissive := []networking.FilterChain{
-		{
-			TLSContext: tlsContext,
-			FilterChainMatch: &listener.FilterChainMatch{
-				ApplicationProtocols: []string{"istio-peer-exchange", "istio"},
-			},
-			ListenerFilters: []*listener.ListenerFilter{
-				xdsfilters.TLSInspector,
-			},
-		},
-		{
-			FilterChainMatch: &listener.FilterChainMatch{},
-		},
+	expectedPermissive := plugin.MTLSSettings{
+		Port: 8080,
+		Mode: model.MTLSPermissive,
+		TCP:  tlsContext,
+		HTTP: tlsContextHTTP,
 	}
 
 	cases := []struct {
 		name         string
-		peerPolicies []*model.Config
-		sdsUdsPath   string
-		expected     []networking.FilterChain
+		peerPolicies []*config.Config
+		expected     plugin.MTLSSettings
 	}{
 		{
 			name:     "No policy - behave as permissive",
@@ -1345,7 +1559,7 @@ func TestOnInboundFilterChain(t *testing.T) {
 		},
 		{
 			name: "Single policy - disable mode",
-			peerPolicies: []*model.Config{
+			peerPolicies: []*config.Config{
 				{
 					Spec: &v1beta1.PeerAuthentication{
 						Mtls: &v1beta1.PeerAuthentication_MutualTLS{
@@ -1354,11 +1568,11 @@ func TestOnInboundFilterChain(t *testing.T) {
 					},
 				},
 			},
-			expected: nil,
+			expected: plugin.MTLSSettings{Port: 8080, Mode: model.MTLSDisable},
 		},
 		{
 			name: "Single policy - permissive mode",
-			peerPolicies: []*model.Config{
+			peerPolicies: []*config.Config{
 				{
 					Spec: &v1beta1.PeerAuthentication{
 						Mtls: &v1beta1.PeerAuthentication_MutualTLS{
@@ -1371,7 +1585,7 @@ func TestOnInboundFilterChain(t *testing.T) {
 		},
 		{
 			name: "Single policy - strict mode",
-			peerPolicies: []*model.Config{
+			peerPolicies: []*config.Config{
 				{
 					Spec: &v1beta1.PeerAuthentication{
 						Mtls: &v1beta1.PeerAuthentication_MutualTLS{
@@ -1384,9 +1598,9 @@ func TestOnInboundFilterChain(t *testing.T) {
 		},
 		{
 			name: "Multiple policies resolved to STRICT",
-			peerPolicies: []*model.Config{
+			peerPolicies: []*config.Config{
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:              "now",
 						Namespace:         "my-ns",
 						CreationTimestamp: now,
@@ -1403,7 +1617,7 @@ func TestOnInboundFilterChain(t *testing.T) {
 					},
 				},
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:              "later",
 						Namespace:         "my-ns",
 						CreationTimestamp: now.Add(time.Second),
@@ -1424,9 +1638,9 @@ func TestOnInboundFilterChain(t *testing.T) {
 		},
 		{
 			name: "Multiple policies resolved to PERMISSIVE",
-			peerPolicies: []*model.Config{
+			peerPolicies: []*config.Config{
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:              "now",
 						Namespace:         "my-ns",
 						CreationTimestamp: now,
@@ -1443,7 +1657,7 @@ func TestOnInboundFilterChain(t *testing.T) {
 					},
 				},
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:              "earlier",
 						Namespace:         "my-ns",
 						CreationTimestamp: now.Add(time.Second * -1),
@@ -1464,7 +1678,7 @@ func TestOnInboundFilterChain(t *testing.T) {
 		},
 		{
 			name: "Port level hit",
-			peerPolicies: []*model.Config{
+			peerPolicies: []*config.Config{
 				{
 					Spec: &v1beta1.PeerAuthentication{
 						Selector: &type_beta.WorkloadSelector{
@@ -1487,7 +1701,7 @@ func TestOnInboundFilterChain(t *testing.T) {
 		},
 		{
 			name: "Port level miss",
-			peerPolicies: []*model.Config{
+			peerPolicies: []*config.Config{
 				{
 					Spec: &v1beta1.PeerAuthentication{
 						Selector: &type_beta.WorkloadSelector{
@@ -1516,14 +1730,13 @@ func TestOnInboundFilterChain(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := NewPolicyApplier("root-namespace", nil, tc.peerPolicies).InboundFilterChain(
+			got := NewPolicyApplier("root-namespace", nil, tc.peerPolicies, &model.PushContext{}).InboundMTLSSettings(
 				8080,
-				tc.sdsUdsPath,
 				testNode,
-				networking.ListenerProtocolAuto,
+				[]string{},
 			)
-			if !reflect.DeepEqual(got, tc.expected) {
-				t.Errorf("[%v] unexpected filter chains, got %v, want %v", tc.name, got, tc.expected)
+			if diff := cmp.Diff(tc.expected, got, protocmp.Transform()); diff != "" {
+				t.Errorf("unexpected filter chains: %v", diff)
 			}
 		})
 	}
@@ -1533,19 +1746,23 @@ func TestComposePeerAuthentication(t *testing.T) {
 	now := time.Now()
 	tests := []struct {
 		name    string
-		configs []*model.Config
+		configs []*config.Config
 		want    *v1beta1.PeerAuthentication
 	}{
 		{
 			name:    "no config",
-			configs: []*model.Config{},
-			want:    nil,
+			configs: []*config.Config{},
+			want: &v1beta1.PeerAuthentication{
+				Mtls: &v1beta1.PeerAuthentication_MutualTLS{
+					Mode: v1beta1.PeerAuthentication_MutualTLS_PERMISSIVE,
+				},
+			},
 		},
 		{
 			name: "mesh only",
-			configs: []*model.Config{
+			configs: []*config.Config{
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:      "default",
 						Namespace: "root-namespace",
 					},
@@ -1564,9 +1781,9 @@ func TestComposePeerAuthentication(t *testing.T) {
 		},
 		{
 			name: "mesh vs namespace",
-			configs: []*model.Config{
+			configs: []*config.Config{
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:      "default",
 						Namespace: "root-namespace",
 					},
@@ -1580,7 +1797,7 @@ func TestComposePeerAuthentication(t *testing.T) {
 					},
 				},
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:      "default",
 						Namespace: "my-ns",
 					},
@@ -1599,9 +1816,9 @@ func TestComposePeerAuthentication(t *testing.T) {
 		},
 		{
 			name: "ignore non-empty selector in root namespace",
-			configs: []*model.Config{
+			configs: []*config.Config{
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:      "default",
 						Namespace: "root-namespace",
 					},
@@ -1617,20 +1834,24 @@ func TestComposePeerAuthentication(t *testing.T) {
 					},
 				},
 			},
-			want: nil,
+			want: &v1beta1.PeerAuthentication{
+				Mtls: &v1beta1.PeerAuthentication_MutualTLS{
+					Mode: v1beta1.PeerAuthentication_MutualTLS_PERMISSIVE,
+				},
+			},
 		},
 		{
 			name: "workload vs namespace config",
-			configs: []*model.Config{
+			configs: []*config.Config{
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:      "default",
 						Namespace: "my-ns",
 					},
 					Spec: &v1beta1.PeerAuthentication{},
 				},
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:      "foo",
 						Namespace: "my-ns",
 					},
@@ -1651,9 +1872,9 @@ func TestComposePeerAuthentication(t *testing.T) {
 		},
 		{
 			name: "workload vs mesh config",
-			configs: []*model.Config{
+			configs: []*config.Config{
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:      "default",
 						Namespace: "my-ns",
 					},
@@ -1664,7 +1885,7 @@ func TestComposePeerAuthentication(t *testing.T) {
 					},
 				},
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:      "default",
 						Namespace: "root-namespace",
 					},
@@ -1683,9 +1904,9 @@ func TestComposePeerAuthentication(t *testing.T) {
 		},
 		{
 			name: "multiple mesh policy",
-			configs: []*model.Config{
+			configs: []*config.Config{
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:              "now",
 						Namespace:         "root-namespace",
 						CreationTimestamp: now,
@@ -1697,7 +1918,7 @@ func TestComposePeerAuthentication(t *testing.T) {
 					},
 				},
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:              "second ago",
 						Namespace:         "root-namespace",
 						CreationTimestamp: now.Add(time.Second * -1),
@@ -1709,7 +1930,7 @@ func TestComposePeerAuthentication(t *testing.T) {
 					},
 				},
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:              "second later",
 						Namespace:         "root-namespace",
 						CreationTimestamp: now.Add(time.Second * -1),
@@ -1729,9 +1950,9 @@ func TestComposePeerAuthentication(t *testing.T) {
 		},
 		{
 			name: "multiple namespace policy",
-			configs: []*model.Config{
+			configs: []*config.Config{
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:              "now",
 						Namespace:         "my-ns",
 						CreationTimestamp: now,
@@ -1743,7 +1964,7 @@ func TestComposePeerAuthentication(t *testing.T) {
 					},
 				},
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:              "second ago",
 						Namespace:         "my-ns",
 						CreationTimestamp: now.Add(time.Second * -1),
@@ -1755,7 +1976,7 @@ func TestComposePeerAuthentication(t *testing.T) {
 					},
 				},
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:              "second later",
 						Namespace:         "my-ns",
 						CreationTimestamp: now.Add(time.Second * -1),
@@ -1775,9 +1996,9 @@ func TestComposePeerAuthentication(t *testing.T) {
 		},
 		{
 			name: "multiple workload policy",
-			configs: []*model.Config{
+			configs: []*config.Config{
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:              "now",
 						Namespace:         "my-ns",
 						CreationTimestamp: now,
@@ -1794,7 +2015,7 @@ func TestComposePeerAuthentication(t *testing.T) {
 					},
 				},
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:              "second ago",
 						Namespace:         "my-ns",
 						CreationTimestamp: now.Add(time.Second * -1),
@@ -1811,7 +2032,7 @@ func TestComposePeerAuthentication(t *testing.T) {
 					},
 				},
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:              "second later",
 						Namespace:         "my-ns",
 						CreationTimestamp: now.Add(time.Second * -1),
@@ -1836,9 +2057,9 @@ func TestComposePeerAuthentication(t *testing.T) {
 		},
 		{
 			name: "inheritance: default mesh",
-			configs: []*model.Config{
+			configs: []*config.Config{
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:      "default",
 						Namespace: "root-namespace",
 					},
@@ -1857,9 +2078,9 @@ func TestComposePeerAuthentication(t *testing.T) {
 		},
 		{
 			name: "inheritance: mesh to workload",
-			configs: []*model.Config{
+			configs: []*config.Config{
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:      "default",
 						Namespace: "root-namespace",
 					},
@@ -1870,7 +2091,7 @@ func TestComposePeerAuthentication(t *testing.T) {
 					},
 				},
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:      "foo",
 						Namespace: "my-ns",
 					},
@@ -1891,9 +2112,9 @@ func TestComposePeerAuthentication(t *testing.T) {
 		},
 		{
 			name: "inheritance: namespace to workload",
-			configs: []*model.Config{
+			configs: []*config.Config{
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:      "default",
 						Namespace: "my-ns",
 					},
@@ -1904,7 +2125,7 @@ func TestComposePeerAuthentication(t *testing.T) {
 					},
 				},
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:      "foo",
 						Namespace: "my-ns",
 					},
@@ -1925,9 +2146,9 @@ func TestComposePeerAuthentication(t *testing.T) {
 		},
 		{
 			name: "inheritance: mesh to namespace to workload",
-			configs: []*model.Config{
+			configs: []*config.Config{
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:      "default",
 						Namespace: "root-namespace",
 					},
@@ -1938,7 +2159,7 @@ func TestComposePeerAuthentication(t *testing.T) {
 					},
 				},
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:      "default",
 						Namespace: "my-ns",
 					},
@@ -1949,7 +2170,7 @@ func TestComposePeerAuthentication(t *testing.T) {
 					},
 				},
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:      "foo",
 						Namespace: "my-ns",
 					},
@@ -1970,9 +2191,9 @@ func TestComposePeerAuthentication(t *testing.T) {
 		},
 		{
 			name: "port level",
-			configs: []*model.Config{
+			configs: []*config.Config{
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:      "default",
 						Namespace: "root-namespace",
 					},
@@ -1983,7 +2204,7 @@ func TestComposePeerAuthentication(t *testing.T) {
 					},
 				},
 				{
-					ConfigMeta: model.ConfigMeta{
+					Meta: config.Meta{
 						Name:      "foo",
 						Namespace: "my-ns",
 					},

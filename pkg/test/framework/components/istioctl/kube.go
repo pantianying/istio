@@ -18,34 +18,35 @@ import (
 	"bytes"
 	"fmt"
 	"strings"
-	"testing"
 
 	"istio.io/istio/istioctl/cmd"
 	"istio.io/istio/pilot/pkg/config/kube/crd"
-
-	"istio.io/istio/pkg/test/framework/components/environment/kube"
+	"istio.io/istio/pkg/test"
 	"istio.io/istio/pkg/test/framework/resource"
 )
 
 type kubeComponent struct {
-	config  Config
-	id      resource.ID
-	cluster kube.Cluster
+	config     Config
+	kubeconfig string
 }
 
-func newKube(ctx resource.Context, config Config) Instance {
-	n := &kubeComponent{
-		config:  config,
-		cluster: ctx.Clusters().GetOrDefault(config.Cluster).(kube.Cluster),
+// Filenamer is an interface to avoid importing kubecluster package, instead build our own interface
+// to extract kube context
+type Filenamer interface {
+	Filename() string
+}
+
+func newKube(ctx resource.Context, config Config) (Instance, error) {
+	fn, ok := ctx.Clusters().GetOrDefault(config.Cluster).(Filenamer)
+	if !ok {
+		return nil, fmt.Errorf("cluster does not support fetching kube config")
 	}
-	n.id = ctx.TrackResource(n)
+	n := &kubeComponent{
+		config:     config,
+		kubeconfig: fn.Filename(),
+	}
 
-	return n
-}
-
-// ID implements resource.Instance
-func (c *kubeComponent) ID() resource.ID {
-	return c.id
+	return n, nil
 }
 
 // Invoke implements WaitForConfigs
@@ -68,9 +69,9 @@ func (c *kubeComponent) WaitForConfigs(defaultNamespace string, configs string) 
 
 // Invoke implements Instance
 func (c *kubeComponent) Invoke(args []string) (string, string, error) {
-	var cmdArgs = append([]string{
+	cmdArgs := append([]string{
 		"--kubeconfig",
-		c.cluster.Filename(),
+		c.kubeconfig,
 	}, args...)
 
 	var out bytes.Buffer
@@ -83,7 +84,7 @@ func (c *kubeComponent) Invoke(args []string) (string, string, error) {
 }
 
 // InvokeOrFail implements Instance
-func (c *kubeComponent) InvokeOrFail(t *testing.T, args []string) (string, string) {
+func (c *kubeComponent) InvokeOrFail(t test.Failer, args []string) (string, string) {
 	output, stderr, err := c.Invoke(args)
 	if err != nil {
 		t.Logf("Unwanted exception for 'istioctl %s': %v", strings.Join(args, " "), err)

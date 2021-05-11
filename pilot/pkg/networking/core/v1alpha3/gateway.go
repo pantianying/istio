@@ -16,9 +16,8 @@ package v1alpha3
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
-
-	"istio.io/istio/pkg/config/constants"
 
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
@@ -27,11 +26,8 @@ import (
 	tls "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	"github.com/hashicorp/go-multierror"
 
-	networking "istio.io/api/networking/v1alpha3"
-	"istio.io/pkg/log"
-
 	meshconfig "istio.io/api/mesh/v1alpha1"
-
+	networking "istio.io/api/networking/v1alpha3"
 	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/model"
 	istionetworking "istio.io/istio/pilot/pkg/networking"
@@ -39,15 +35,18 @@ import (
 	"istio.io/istio/pilot/pkg/networking/plugin"
 	"istio.io/istio/pilot/pkg/networking/util"
 	authn_model "istio.io/istio/pilot/pkg/security/model"
+	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/gateway"
 	"istio.io/istio/pkg/config/host"
 	"istio.io/istio/pkg/config/protocol"
 	"istio.io/istio/pkg/proto"
+	"istio.io/istio/pkg/util/istiomultierror"
+	"istio.io/pkg/log"
 )
 
 func (configgen *ConfigGeneratorImpl) buildGatewayListeners(builder *ListenerBuilder) *ListenerBuilder {
 	if builder.node.MergedGateway == nil {
-		log.Debuga("buildGatewayListeners: no gateways for router ", builder.node.ID)
+		log.Debug("buildGatewayListeners: no gateways for router ", builder.node.ID)
 		return builder
 	}
 
@@ -55,14 +54,15 @@ func (configgen *ConfigGeneratorImpl) buildGatewayListeners(builder *ListenerBui
 	log.Debugf("buildGatewayListeners: gateways after merging: %v", mergedGateway)
 
 	actualWildcard, _ := getActualWildcardAndLocalHost(builder.node)
-	errs := &multierror.Error{}
-	listeners := make([]*listener.Listener, 0, len(mergedGateway.Servers))
+	errs := istiomultierror.New()
+	listeners := make([]*listener.Listener, 0)
 	proxyConfig := builder.node.Metadata.ProxyConfigOrDefault(builder.push.Mesh.DefaultConfig)
-	for portNumber, servers := range mergedGateway.Servers {
+	for port, ms := range mergedGateway.MergedServers {
+		servers := ms.Servers
 		var si *model.ServiceInstance
 		services := make(map[host.Name]struct{}, len(builder.node.ServiceInstances))
 		for _, w := range builder.node.ServiceInstances {
-			if w.ServicePort.Port == int(portNumber) {
+			if w.ServicePort.Port == int(port.Number) {
 				if si == nil {
 					si = w
 				}
@@ -71,31 +71,41 @@ func (configgen *ConfigGeneratorImpl) buildGatewayListeners(builder *ListenerBui
 		}
 		if len(services) != 1 {
 			log.Warnf("buildGatewayListeners: found %d services on port %d: %v",
-				len(services), portNumber, services)
+				len(services), port.Number, services)
 		}
 		// if we found a ServiceInstance with matching ServicePort, listen on TargetPort
 		if si != nil && si.Endpoint != nil {
-			portNumber = si.Endpoint.EndpointPort
+			port.Number = si.Endpoint.EndpointPort
 		}
+		if builder.node.Metadata.UnprivilegedPod != "" && port.Number < 1024 {
+			log.Warnf("buildGatewayListeners: skipping privileged gateway port %d for node %s as it is an unprivileged pod",
+				port.Number, builder.node.ID)
+			continue
+		}
+		bind := actualWildcard
+		if len(port.Bind) > 0 {
+			bind = port.Bind
+		}
+
 		// on a given port, we can either have plain text HTTP servers or
 		// HTTPS/TLS servers with SNI. We cannot have a mix of http and https server on same port.
 		opts := buildListenerOpts{
 			push:       builder.push,
 			proxy:      builder.node,
-			bind:       actualWildcard,
-			port:       int(portNumber),
+			bind:       bind,
+			port:       &model.Port{Port: int(port.Number)},
 			bindToPort: true,
+			class:      ListenerClassGateway,
 		}
 
-		p := protocol.Parse(servers[0].Port.Protocol)
-		listenerProtocol := istionetworking.ModelProtocolToListenerProtocol(p, core.TrafficDirection_OUTBOUND)
+		p := protocol.Parse(port.Protocol)
 		filterChains := make([]istionetworking.FilterChain, 0)
 		if p.IsHTTP() {
 			// We have a list of HTTP servers on this port. Build a single listener for the server port.
 			// We only need to look at the first server in the list as the merge logic
 			// ensures that all servers are of same type.
-			routeName := mergedGateway.RouteNamesByServer[servers[0]]
-			opts.filterChainOpts = []*filterChainOpts{configgen.createGatewayHTTPFilterChainOpts(builder.node, servers[0], routeName, "", proxyConfig)}
+			port := &networking.Port{Number: port.Number, Protocol: port.Protocol}
+			opts.filterChainOpts = []*filterChainOpts{configgen.createGatewayHTTPFilterChainOpts(builder.node, port, nil, ms.RouteName, proxyConfig)}
 			filterChains = append(filterChains, istionetworking.FilterChain{ListenerProtocol: istionetworking.ListenerProtocolHTTP})
 		} else {
 			// build http connection manager with TLS context, for HTTPS servers using simple/mutual TLS
@@ -107,10 +117,10 @@ func (configgen *ConfigGeneratorImpl) buildGatewayListeners(builder *ListenerBui
 
 			for _, server := range servers {
 				if gateway.IsTLSServer(server) && gateway.IsHTTPServer(server) {
+					routeName := mergedGateway.TLSServerInfo[server].RouteName
 					// This is a HTTPS server, where we are doing TLS termination. Build a http connection manager with TLS context
-					routeName := mergedGateway.RouteNamesByServer[server]
-					filterChainOpts = append(filterChainOpts, configgen.createGatewayHTTPFilterChainOpts(builder.node, server,
-						routeName, constants.DefaultSdsUdsPath, proxyConfig))
+					filterChainOpts = append(filterChainOpts, configgen.createGatewayHTTPFilterChainOpts(builder.node, server.Port, server,
+						routeName, proxyConfig))
 					filterChains = append(filterChains, istionetworking.FilterChain{
 						ListenerProtocol:   istionetworking.ListenerProtocolHTTP,
 						IstioMutualGateway: server.Tls.Mode == networking.ServerTLSSettings_ISTIO_MUTUAL,
@@ -128,35 +138,30 @@ func (configgen *ConfigGeneratorImpl) buildGatewayListeners(builder *ListenerBui
 			opts.filterChainOpts = filterChainOpts
 		}
 
-		l := buildListener(opts)
-		l.TrafficDirection = core.TrafficDirection_OUTBOUND
+		l := buildListener(opts, core.TrafficDirection_OUTBOUND)
 
-		mutable := &istionetworking.MutableObjects{
-			Listener: l,
-			// Note: buildListener creates filter chains but does not populate the filters in the chain; that's what
-			// this is for.
-			FilterChains: filterChains,
+		mutable := &MutableListener{
+			MutableObjects: istionetworking.MutableObjects{
+				Listener: l,
+				// Note: buildListener creates filter chains but does not populate the filters in the chain; that's what
+				// this is for.
+				FilterChains: filterChains,
+			},
 		}
 
 		pluginParams := &plugin.InputParams{
-			ListenerProtocol: listenerProtocol,
-			Node:             builder.node,
-			Push:             builder.push,
-			ServiceInstance:  si,
-			Port: &model.Port{
-				Name:     servers[0].Port.Name,
-				Port:     int(portNumber),
-				Protocol: p,
-			},
+			Node:            builder.node,
+			Push:            builder.push,
+			ServiceInstance: si,
 		}
 		for _, p := range configgen.Plugins {
-			if err := p.OnOutboundListener(pluginParams, mutable); err != nil {
-				log.Warna("buildGatewayListeners: failed to build listener for gateway: ", err.Error())
+			if err := p.OnOutboundListener(pluginParams, &mutable.MutableObjects); err != nil {
+				log.Warn("buildGatewayListeners: failed to build listener for gateway: ", err.Error())
 			}
 		}
 
 		// Filters are serialized one time into an opaque struct once we have the complete list.
-		if err := buildCompleteFilterChain(pluginParams, mutable, opts); err != nil {
+		if err := mutable.build(opts); err != nil {
 			errs = multierror.Append(errs, fmt.Errorf("gateway omitting listener %q due to: %v", mutable.Listener.Name, err.Error()))
 			continue
 		}
@@ -175,7 +180,7 @@ func (configgen *ConfigGeneratorImpl) buildGatewayListeners(builder *ListenerBui
 	}
 
 	if len(listeners) == 0 {
-		log.Error("buildGatewayListeners: Have zero listeners")
+		log.Warnf("gateway has zero listeners for node %v", builder.node.ID)
 		return builder
 	}
 
@@ -183,11 +188,52 @@ func (configgen *ConfigGeneratorImpl) buildGatewayListeners(builder *ListenerBui
 	return builder
 }
 
+func buildNameToServiceMapForHTTPRoutes(node *model.Proxy, push *model.PushContext,
+	virtualService config.Config) map[host.Name]*model.Service {
+	vs := virtualService.Spec.(*networking.VirtualService)
+	nameToServiceMap := map[host.Name]*model.Service{}
+
+	addService := func(hostname host.Name) {
+		if _, exist := nameToServiceMap[hostname]; exist {
+			return
+		}
+
+		var service *model.Service
+		// First, we obtain the service which has the same namespace as virtualService
+		s, exist := push.ServiceIndex.HostnameAndNamespace[hostname][virtualService.Namespace]
+		if exist {
+			// We should check whether the selected service is visible to the proxy node.
+			if push.IsServiceVisible(s, node.ConfigNamespace) {
+				service = s
+			}
+		}
+		// If we find no service for the namespace of virtualService or the selected service is not visible to the proxy node,
+		// we should fallback to pick one service which is visible to the ConfigNamespace of node.
+		if service == nil {
+			service = push.ServiceForHostname(node, hostname)
+		}
+		nameToServiceMap[hostname] = service
+	}
+
+	for _, httpRoute := range vs.Http {
+		if httpRoute.GetMirror() != nil {
+			addService(host.Name(httpRoute.GetMirror().GetHost()))
+		}
+
+		for _, route := range httpRoute.GetRoute() {
+			if route.GetDestination() != nil {
+				addService(host.Name(route.GetDestination().GetHost()))
+			}
+		}
+	}
+
+	return nameToServiceMap
+}
+
 func (configgen *ConfigGeneratorImpl) buildGatewayHTTPRouteConfig(node *model.Proxy, push *model.PushContext,
 	routeName string) *route.RouteConfiguration {
-
 	if node.MergedGateway == nil {
-		log.Debuga("buildGatewayRoutes: no gateways for router ", node.ID)
+		log.Debug("buildGatewayRoutes: no gateways for router ", node.ID)
 		return nil
 	}
 
@@ -206,38 +252,43 @@ func (configgen *ConfigGeneratorImpl) buildGatewayHTTPRouteConfig(node *model.Pr
 	servers := merged.ServersByRouteName[routeName]
 	port := int(servers[0].Port.Number) // all these servers are for the same routeName, and therefore same port
 
-	nameToServiceMap := push.ServiceByHostname
-
 	gatewayRoutes := make(map[string]map[string][]*route.Route)
-	gatewayVirtualServices := make(map[string][]model.Config)
+	gatewayVirtualServices := make(map[string][]config.Config)
 	vHostDedupMap := make(map[host.Name]*route.VirtualHost)
 	for _, server := range servers {
 		gatewayName := merged.GatewayNameForServer[server]
-		if server.Tls != nil && server.Tls.HttpsRedirect {
-			// this is a plaintext server with TLS redirect enabled. There is no point in processing the
-			// virtual services for this server because all traffic is anyway going to get redirected
-			// to https. short circuit the route computation by generating a virtual host with no routes
-			// but with tls redirect enabled
-			for _, hostname := range server.Hosts {
-				newVHost := &route.VirtualHost{
-					Name:                       domainName(hostname, port),
-					Domains:                    buildGatewayVirtualHostDomains(hostname),
-					IncludeRequestAttemptCount: true,
-				}
-				newVHost.RequireTls = route.VirtualHost_ALL
-				vHostDedupMap[host.Name(hostname)] = newVHost
-			}
-			continue
-		}
 
-		var virtualServices []model.Config
+		var virtualServices []config.Config
 		var exists bool
 
 		if virtualServices, exists = gatewayVirtualServices[gatewayName]; !exists {
 			virtualServices = push.VirtualServicesForGateway(node, gatewayName)
 			gatewayVirtualServices[gatewayName] = virtualServices
 		}
-
+		if len(virtualServices) == 0 && server.Tls != nil && server.Tls.HttpsRedirect {
+			// this is a plaintext server with TLS redirect enabled. There is no point in processing the
+			// virtual services for this server because all traffic is anyway going to get redirected
+			// to https. short circuit the route computation by generating a virtual host with no routes
+			// but with tls redirect enabled
+			for _, hostname := range server.Hosts {
+				if vHost, exists := vHostDedupMap[host.Name(hostname)]; exists {
+					if server.Tls != nil && server.Tls.HttpsRedirect {
+						vHost.RequireTls = route.VirtualHost_ALL
+					}
+				} else {
+					newVHost := &route.VirtualHost{
+						Name:                       domainName(hostname, port),
+						Domains:                    buildGatewayVirtualHostDomains(hostname, port),
+						IncludeRequestAttemptCount: true,
+					}
+					if server.Tls != nil && server.Tls.HttpsRedirect {
+						newVHost.RequireTls = route.VirtualHost_ALL
+					}
+					vHostDedupMap[host.Name(hostname)] = newVHost
+				}
+			}
+			continue
+		}
 		for _, virtualService := range virtualServices {
 			virtualServiceHosts := host.NewNames(virtualService.Spec.(*networking.VirtualService).Hosts)
 			serverHosts := host.NamesForNamespace(server.Hosts, virtualService.Namespace)
@@ -249,6 +300,9 @@ func (configgen *ConfigGeneratorImpl) buildGatewayHTTPRouteConfig(node *model.Pr
 			if len(intersectingHosts) == 0 {
 				continue
 			}
+
+			// Make sure we can obtain services which are visible to this virtualService as much as possible.
+			nameToServiceMap := buildNameToServiceMapForHTTPRoutes(node, push, virtualService)
 
 			var routes []*route.Route
 			var exists bool
@@ -270,16 +324,19 @@ func (configgen *ConfigGeneratorImpl) buildGatewayHTTPRouteConfig(node *model.Pr
 
 			for _, hostname := range intersectingHosts {
 				if vHost, exists := vHostDedupMap[hostname]; exists {
-					// before merging this virtual service's routes, make sure that the existing one is not a tls redirect host
-					if vHost.RequireTls == route.VirtualHost_NONE {
-						vHost.Routes = append(vHost.Routes, routes...)
+					vHost.Routes = append(vHost.Routes, routes...)
+					if server.Tls != nil && server.Tls.HttpsRedirect {
+						vHost.RequireTls = route.VirtualHost_ALL
 					}
 				} else {
 					newVHost := &route.VirtualHost{
 						Name:                       domainName(string(hostname), port),
-						Domains:                    buildGatewayVirtualHostDomains(string(hostname)),
+						Domains:                    buildGatewayVirtualHostDomains(string(hostname), port),
 						Routes:                     routes,
 						IncludeRequestAttemptCount: true,
+					}
+					if server.Tls != nil && server.Tls.HttpsRedirect {
+						newVHost.RequireTls = route.VirtualHost_ALL
 					}
 					vHostDedupMap[hostname] = newVHost
 				}
@@ -293,21 +350,9 @@ func (configgen *ConfigGeneratorImpl) buildGatewayHTTPRouteConfig(node *model.Pr
 		virtualHosts = []*route.VirtualHost{{
 			Name:    domainName("blackhole", port),
 			Domains: []string{"*"},
-			Routes: []*route.Route{
-				{
-					Match: &route.RouteMatch{
-						PathSpecifier: &route.RouteMatch_Prefix{Prefix: "/"},
-					},
-					Action: &route.Route_DirectResponse{
-						DirectResponse: &route.DirectResponseAction{
-							Status: 404,
-						},
-					},
-				},
-			},
+			// Empty route list will cause Envoy to 404 NR any requests
+			Routes: []*route.Route{},
 		}}
-		// add a name to the route
-		virtualHosts[0].Routes[0].Name = istio_route.DefaultRouteName
 	} else {
 		virtualHosts = make([]*route.VirtualHost, 0, len(vHostDedupMap))
 		for _, v := range vHostDedupMap {
@@ -325,42 +370,13 @@ func (configgen *ConfigGeneratorImpl) buildGatewayHTTPRouteConfig(node *model.Pr
 		ValidateClusters: proto.BoolFalse,
 	}
 
-	in := &plugin.InputParams{
-		ListenerProtocol: istionetworking.ListenerProtocolHTTP,
-		ListenerCategory: networking.EnvoyFilter_GATEWAY,
-		Node:             node,
-		Push:             push,
-	}
-
-	// call plugins
-	for _, p := range configgen.Plugins {
-		p.OnOutboundRouteConfiguration(in, routeCfg)
-	}
-
 	return routeCfg
 }
 
 // builds a HTTP connection manager for servers of type HTTP or HTTPS (mode: simple/mutual)
-func (configgen *ConfigGeneratorImpl) createGatewayHTTPFilterChainOpts(node *model.Proxy, server *networking.Server,
-	routeName string, sdsPath string, proxyConfig *meshconfig.ProxyConfig) *filterChainOpts {
-
-	serverProto := protocol.Parse(server.Port.Protocol)
-
-	httpProtoOpts := &core.Http1ProtocolOptions{}
-
-	if features.HTTP10 || node.Metadata.HTTP10 == "1" {
-		httpProtoOpts.AcceptHttp_10 = true
-	}
-
-	xffNumTrustedHops := uint32(0)
-	forwardClientCertDetails := util.MeshConfigToEnvoyForwardClientCertDetails(meshconfig.Topology_SANITIZE_SET)
-
-	if proxyConfig != nil && proxyConfig.GatewayTopology != nil {
-		xffNumTrustedHops = proxyConfig.GatewayTopology.NumTrustedProxies
-		if proxyConfig.GatewayTopology.ForwardClientCertDetails != meshconfig.Topology_UNDEFINED {
-			forwardClientCertDetails = util.MeshConfigToEnvoyForwardClientCertDetails(proxyConfig.GatewayTopology.ForwardClientCertDetails)
-		}
-	}
+func (configgen *ConfigGeneratorImpl) createGatewayHTTPFilterChainOpts(node *model.Proxy, port *networking.Port, server *networking.Server,
+	routeName string, proxyConfig *meshconfig.ProxyConfig) *filterChainOpts {
+	serverProto := protocol.Parse(port.Protocol)
 
 	if serverProto.IsHTTP() {
 		return &filterChainOpts{
@@ -370,22 +386,10 @@ func (configgen *ConfigGeneratorImpl) createGatewayHTTPFilterChainOpts(node *mod
 			sniHosts:   nil,
 			tlsContext: nil,
 			httpOpts: &httpListenerOpts{
-				rds:              routeName,
-				useRemoteAddress: true,
-				connectionManager: &hcm.HttpConnectionManager{
-					XffNumTrustedHops: xffNumTrustedHops,
-					// Forward client cert if connection is mTLS
-					ForwardClientCertDetails: forwardClientCertDetails,
-					SetCurrentClientCertDetails: &hcm.HttpConnectionManager_SetCurrentClientCertDetails{
-						Subject: proto.BoolTrue,
-						Cert:    true,
-						Uri:     true,
-						Dns:     true,
-					},
-					ServerName:          EnvoyServerName,
-					HttpProtocolOptions: httpProtoOpts,
-				},
-				addGRPCWebFilter: serverProto == protocol.GRPCWeb,
+				rds:               routeName,
+				useRemoteAddress:  true,
+				connectionManager: buildGatewayConnectionManager(proxyConfig, node),
+				addGRPCWebFilter:  serverProto == protocol.GRPCWeb,
 			},
 		}
 	}
@@ -397,27 +401,51 @@ func (configgen *ConfigGeneratorImpl) createGatewayHTTPFilterChainOpts(node *mod
 		// This works because we validate that only HTTPS servers can have same port but still different port names
 		// and that no two non-HTTPS servers can be on same port or share port names.
 		// Validation is done per gateway and also during merging
-		sniHosts:   node.MergedGateway.SNIHostsByServer[server],
-		tlsContext: buildGatewayListenerTLSContext(server, sdsPath, node.Metadata),
+		sniHosts:   node.MergedGateway.TLSServerInfo[server].SNIHosts,
+		tlsContext: buildGatewayListenerTLSContext(server, node),
 		httpOpts: &httpListenerOpts{
-			rds:              routeName,
-			useRemoteAddress: true,
-			connectionManager: &hcm.HttpConnectionManager{
-				XffNumTrustedHops: xffNumTrustedHops,
-				// Forward client cert if connection is mTLS
-				ForwardClientCertDetails: forwardClientCertDetails,
-				SetCurrentClientCertDetails: &hcm.HttpConnectionManager_SetCurrentClientCertDetails{
-					Subject: proto.BoolTrue,
-					Cert:    true,
-					Uri:     true,
-					Dns:     true,
-				},
-				ServerName:          EnvoyServerName,
-				HttpProtocolOptions: httpProtoOpts,
-			},
-			addGRPCWebFilter: serverProto == protocol.GRPCWeb,
-			statPrefix:       server.Name,
+			rds:               routeName,
+			useRemoteAddress:  true,
+			connectionManager: buildGatewayConnectionManager(proxyConfig, node),
+			addGRPCWebFilter:  serverProto == protocol.GRPCWeb,
+			statPrefix:        server.Name,
 		},
+	}
+}
+
+func buildGatewayConnectionManager(proxyConfig *meshconfig.ProxyConfig, node *model.Proxy) *hcm.HttpConnectionManager {
+	httpProtoOpts := &core.Http1ProtocolOptions{}
+	if features.HTTP10 || node.Metadata.HTTP10 == "1" {
+		httpProtoOpts.AcceptHttp_10 = true
+	}
+	xffNumTrustedHops := uint32(0)
+	forwardClientCertDetails := util.MeshConfigToEnvoyForwardClientCertDetails(meshconfig.Topology_SANITIZE_SET)
+
+	if proxyConfig != nil && proxyConfig.GatewayTopology != nil {
+		xffNumTrustedHops = proxyConfig.GatewayTopology.NumTrustedProxies
+		if proxyConfig.GatewayTopology.ForwardClientCertDetails != meshconfig.Topology_UNDEFINED {
+			forwardClientCertDetails = util.MeshConfigToEnvoyForwardClientCertDetails(proxyConfig.GatewayTopology.ForwardClientCertDetails)
+		}
+	}
+
+	var stripPortMode *hcm.HttpConnectionManager_StripAnyHostPort = nil
+	if features.StripHostPort {
+		stripPortMode = &hcm.HttpConnectionManager_StripAnyHostPort{StripAnyHostPort: true}
+	}
+	return &hcm.HttpConnectionManager{
+		XffNumTrustedHops: xffNumTrustedHops,
+		// Forward client cert if connection is mTLS
+		ForwardClientCertDetails: forwardClientCertDetails,
+		SetCurrentClientCertDetails: &hcm.HttpConnectionManager_SetCurrentClientCertDetails{
+			Subject: proto.BoolTrue,
+			Cert:    true,
+			Uri:     true,
+			Dns:     true,
+		},
+		ServerName:          EnvoyServerName,
+		HttpProtocolOptions: httpProtoOpts,
+		StripPortMode:       stripPortMode,
+		DelayedCloseTimeout: features.DelayedCloseTimeout,
 	}
 }
 
@@ -435,7 +463,7 @@ func (configgen *ConfigGeneratorImpl) createGatewayHTTPFilterChainOpts(node *mod
 //
 // Note that ISTIO_MUTUAL TLS mode and ingressSds should not be used simultaneously on the same ingress gateway.
 func buildGatewayListenerTLSContext(
-	server *networking.Server, sdsPath string, metadata *model.NodeMetadata) *tls.DownstreamTlsContext {
+	server *networking.Server, proxy *model.Proxy) *tls.DownstreamTlsContext {
 	// Server.TLS cannot be nil or passthrough. But as a safety guard, return nil
 	if server.Tls == nil || gateway.IsPassThroughServer(server) {
 		return nil // We don't need to setup TLS context for passthrough mode
@@ -447,57 +475,36 @@ func buildGatewayListenerTLSContext(
 		},
 	}
 
-	if server.Tls.CredentialName != "" {
-		// If SDS is enabled at gateway, and credential name is specified at gateway config, create
-		// SDS config for gateway to fetch key/cert at gateway agent.
-		authn_model.ApplyCustomSDSToServerCommonTLSContext(ctx.CommonTlsContext, server.Tls, authn_model.GatewaySdsUdsPath)
-	} else if server.Tls.Mode == networking.ServerTLSSettings_ISTIO_MUTUAL {
-		authn_model.ApplyToCommonTLSContext(ctx.CommonTlsContext, metadata, sdsPath, server.Tls.SubjectAltNames)
-	} else {
-		// Fall back to the read-from-file approach when SDS is not enabled or Tls.CredentialName is not specified.
-		ctx.CommonTlsContext.TlsCertificates = []*tls.TlsCertificate{
-			{
-				CertificateChain: &core.DataSource{
-					Specifier: &core.DataSource_Filename{
-						Filename: server.Tls.ServerCertificate,
-					},
-				},
-				PrivateKey: &core.DataSource{
-					Specifier: &core.DataSource_Filename{
-						Filename: server.Tls.PrivateKey,
-					},
-				},
-			},
-		}
-		var trustedCa *core.DataSource
-		if len(server.Tls.CaCertificates) != 0 {
-			trustedCa = &core.DataSource{
-				Specifier: &core.DataSource_Filename{
-					Filename: server.Tls.CaCertificates,
-				},
-			}
-		}
-		if trustedCa != nil || len(server.Tls.SubjectAltNames) > 0 {
-			ctx.CommonTlsContext.ValidationContextType = &tls.CommonTlsContext_ValidationContext{
-				ValidationContext: &tls.CertificateValidationContext{
-					TrustedCa:            trustedCa,
-					MatchSubjectAltNames: util.StringToExactMatch(server.Tls.SubjectAltNames),
-				},
-			}
-		}
-	}
-
 	ctx.RequireClientCertificate = proto.BoolFalse
 	if server.Tls.Mode == networking.ServerTLSSettings_MUTUAL ||
 		server.Tls.Mode == networking.ServerTLSSettings_ISTIO_MUTUAL {
 		ctx.RequireClientCertificate = proto.BoolTrue
 	}
 
+	switch {
+	// If SDS is enabled at gateway, and credential name is specified at gateway config, create
+	// SDS config for gateway to fetch key/cert at gateway agent.
+	case server.Tls.CredentialName != "":
+		authn_model.ApplyCredentialSDSToServerCommonTLSContext(ctx.CommonTlsContext, server.Tls)
+	case server.Tls.Mode == networking.ServerTLSSettings_ISTIO_MUTUAL:
+		authn_model.ApplyToCommonTLSContext(ctx.CommonTlsContext, proxy, server.Tls.SubjectAltNames, []string{}, ctx.RequireClientCertificate.Value)
+	default:
+		certProxy := &model.Proxy{}
+		certProxy.IstioVersion = proxy.IstioVersion
+		// If certificate files are specified in gateway configuration, use file based SDS.
+		certProxy.Metadata = &model.NodeMetadata{
+			TLSServerCertChain: server.Tls.ServerCertificate,
+			TLSServerKey:       server.Tls.PrivateKey,
+			TLSServerRootCert:  server.Tls.CaCertificates,
+		}
+
+		authn_model.ApplyToCommonTLSContext(ctx.CommonTlsContext, certProxy, server.Tls.SubjectAltNames, []string{}, ctx.RequireClientCertificate.Value)
+	}
+
 	// Set TLS parameters if they are non-default
 	if len(server.Tls.CipherSuites) > 0 ||
 		server.Tls.MinProtocolVersion != networking.ServerTLSSettings_TLS_AUTO ||
 		server.Tls.MaxProtocolVersion != networking.ServerTLSSettings_TLS_AUTO {
-
 		ctx.CommonTlsContext.TlsParams = &tls.TlsParameters{
 			TlsMinimumProtocolVersion: convertTLSProtocol(server.Tls.MinProtocolVersion),
 			TlsMaximumProtocolVersion: convertTLSProtocol(server.Tls.MaxProtocolVersion),
@@ -520,7 +527,6 @@ func convertTLSProtocol(in networking.ServerTLSSettings_TLSProtocol) tls.TlsPara
 func (configgen *ConfigGeneratorImpl) createGatewayTCPFilterChainOpts(
 	node *model.Proxy, push *model.PushContext, server *networking.Server,
 	gatewayName string) []*filterChainOpts {
-
 	// We have a TCP/TLS server. This could be TLS termination (user specifies server.TLS with simple/mutual)
 	// or opaque TCP (server.TLS is nil). or it could be a TLS passthrough with SNI based routing.
 
@@ -544,8 +550,8 @@ func (configgen *ConfigGeneratorImpl) createGatewayTCPFilterChainOpts(
 			push, server, gatewayName); len(filters) > 0 {
 			return []*filterChainOpts{
 				{
-					sniHosts:       node.MergedGateway.SNIHostsByServer[server],
-					tlsContext:     buildGatewayListenerTLSContext(server, constants.DefaultSdsUdsPath, node.Metadata),
+					sniHosts:       node.MergedGateway.TLSServerInfo[server].SNIHosts,
+					tlsContext:     buildGatewayListenerTLSContext(server, node),
 					networkFilters: filters,
 				},
 			}
@@ -574,6 +580,9 @@ func buildGatewayNetworkFiltersFromTCPRoutes(node *model.Proxy, push *model.Push
 	}
 
 	virtualServices := push.VirtualServicesForGateway(node, gateway)
+	if len(virtualServices) == 0 {
+		log.Warnf("no virtual service bound to gateway: %v", gateway)
+	}
 	for _, v := range virtualServices {
 		vsvc := v.Spec.(*networking.VirtualService)
 		// We have two cases here:
@@ -591,7 +600,7 @@ func buildGatewayNetworkFiltersFromTCPRoutes(node *model.Proxy, push *model.Push
 		// based on the match port/server port and the gateway name
 		for _, tcp := range vsvc.Tcp {
 			if l4MultiMatch(tcp.Match, server, gateway) {
-				return buildOutboundNetworkFilters(node, tcp.Route, push, port, v.ConfigMeta)
+				return buildOutboundNetworkFilters(node, tcp.Route, push, port, v.Meta)
 			}
 		}
 	}
@@ -620,11 +629,13 @@ func buildGatewayNetworkFiltersFromTLSRoutes(node *model.Proxy, push *model.Push
 	if server.Tls.Mode == networking.ServerTLSSettings_AUTO_PASSTHROUGH {
 		// auto passthrough does not require virtual services. It sets up envoy.filters.network.sni_cluster filter
 		filterChains = append(filterChains, &filterChainOpts{
-			sniHosts:       node.MergedGateway.SNIHostsByServer[server],
+			sniHosts:       node.MergedGateway.TLSServerInfo[server].SNIHosts,
 			tlsContext:     nil, // NO TLS context because this is passthrough
 			networkFilters: buildOutboundAutoPassthroughFilterStack(push, node, port),
 		})
 	} else {
+		tlsSniHosts := map[string]struct{}{} // sni host -> exists
+
 		virtualServices := push.VirtualServicesForGateway(node, gatewayName)
 		for _, v := range virtualServices {
 			vsvc := v.Spec.(*networking.VirtualService)
@@ -644,13 +655,24 @@ func buildGatewayNetworkFiltersFromTLSRoutes(node *model.Proxy, push *model.Push
 			// matches, one for 1.foo.com, another for 2.foo.com, this code will produce duplicate filter
 			// chain matches
 			for _, tls := range vsvc.Tls {
-				for _, match := range tls.Match {
+				for i, match := range tls.Match {
 					if l4SingleMatch(convertTLSMatchToL4Match(match), server, gatewayName) {
+						// Envoy will reject config that has multiple filter chain matches with the same matching rules
+						// To avoid this, we need to make sure we don't have duplicated SNI hosts, which will become
+						// SNI filter chain matches
+						if duplicateSniHosts := model.CheckDuplicates(match.SniHosts, tlsSniHosts); len(duplicateSniHosts) != 0 {
+							log.Debugf(
+								"skipping VirtualService %s rule #%v on server port %d of gateway %s, duplicate SNI host names: %v",
+								v.Meta.Name, i, port.Port, gatewayName, duplicateSniHosts)
+							model.RecordRejectedConfig(gatewayName)
+							continue
+						}
+
 						// the sni hosts in the match will become part of a filter chain match
 						filterChains = append(filterChains, &filterChainOpts{
 							sniHosts:       match.SniHosts,
 							tlsContext:     nil, // NO TLS context because this is passthrough
-							networkFilters: buildOutboundNetworkFilters(node, tls.Route, push, port, v.ConfigMeta),
+							networkFilters: buildOutboundNetworkFilters(node, tls.Route, push, port, v.Meta),
 						})
 					}
 				}
@@ -663,7 +685,7 @@ func buildGatewayNetworkFiltersFromTLSRoutes(node *model.Proxy, push *model.Push
 
 // Select the virtualService's hosts that match the ones specified in the gateway server's hosts
 // based on the wildcard hostname match and the namespace match
-func pickMatchingGatewayHosts(gatewayServerHosts map[host.Name]bool, virtualService model.Config) map[string]host.Name {
+func pickMatchingGatewayHosts(gatewayServerHosts map[host.Name]bool, virtualService config.Config) map[string]host.Name {
 	matchingHosts := make(map[string]host.Name)
 	virtualServiceHosts := virtualService.Spec.(*networking.VirtualService).Hosts
 	for _, vsvcHost := range virtualServiceHosts {
@@ -677,7 +699,7 @@ func pickMatchingGatewayHosts(gatewayServerHosts map[host.Name]bool, virtualServ
 				if parts[0] != virtualService.Namespace {
 					continue
 				}
-				//strip the namespace
+				// strip the namespace
 				gwHostnameForMatching = host.Name(parts[1])
 			}
 			if gwHostnameForMatching.Matches(host.Name(vsvcHost)) {
@@ -741,12 +763,22 @@ func isGatewayMatch(gateway string, gatewayNames []string) bool {
 	return false
 }
 
-func buildGatewayVirtualHostDomains(hostname string) []string {
+func buildGatewayVirtualHostDomains(hostname string, port int) []string {
 	domains := []string{hostname}
-	if hostname == "*" {
+	if features.StripHostPort || hostname == "*" {
 		return domains
 	}
-	// To support gateway behind a LB with unknown port.
-	domains = append(domains, hostname+":*")
+
+	// Per https://www.envoyproxy.io/docs/envoy/latest/api-v3/config/route/v3/route_components.proto#config-route-v3-virtualhost
+	// we can only have one wildcard. Ideally, we want to match any port, as the host
+	// header may have a different port (behind a LB, nodeport, etc). However, if we
+	// have a wildcard domain we cannot do that since we would need two wildcards.
+	// Therefore, we we will preserve the original port if there is a wildcard host.
+	// TODO(https://github.com/envoyproxy/envoy/issues/12647) support wildcard host with wildcard port.
+	if len(hostname) > 0 && hostname[0] == '*' {
+		domains = append(domains, hostname+":"+strconv.Itoa(port))
+	} else {
+		domains = append(domains, hostname+":*")
+	}
 	return domains
 }

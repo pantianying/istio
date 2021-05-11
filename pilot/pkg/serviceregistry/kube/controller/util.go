@@ -17,14 +17,14 @@ package controller
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	klabels "k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	listerv1 "k8s.io/client-go/listers/core/v1"
-
-	"istio.io/pkg/log"
+	"k8s.io/client-go/tools/cache"
 
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/serviceregistry/kube"
@@ -48,10 +48,6 @@ func getLabelValue(metadata metav1.Object, label string, fallBackLabel string) s
 	}
 
 	return labels[fallBackLabel]
-}
-
-func createUID(podName, namespace string) string {
-	return "kubernetes://" + podName + "." + namespace
 }
 
 // Forked from Kubernetes k8s.io/kubernetes/pkg/api/v1/pod
@@ -193,4 +189,29 @@ func nodeEquals(a, b kubernetesNode) bool {
 func isNodePortGatewayService(svc *v1.Service) bool {
 	_, ok := svc.Annotations[kube.NodeSelectorAnnotation]
 	return ok && svc.Spec.Type == v1.ServiceTypeNodePort
+}
+
+// Get the pod key of the proxy which can be used to get pod from the informer cache
+func podKeyByProxy(proxy *model.Proxy) string {
+	parts := strings.Split(proxy.ID, ".")
+	if len(parts) == 2 && proxy.Metadata.Namespace == parts[1] {
+		return kube.KeyFunc(parts[0], parts[1])
+	}
+
+	return ""
+}
+
+func convertToService(obj interface{}) (*v1.Service, error) {
+	cm, ok := obj.(*v1.Service)
+	if !ok {
+		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+		if !ok {
+			return nil, fmt.Errorf("couldn't get object from tombstone %#v", obj)
+		}
+		cm, ok = tombstone.Obj.(*v1.Service)
+		if !ok {
+			return nil, fmt.Errorf("tombstone contained object that is not a Service %#v", obj)
+		}
+	}
+	return cm, nil
 }

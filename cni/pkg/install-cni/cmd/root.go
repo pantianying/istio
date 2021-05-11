@@ -39,6 +39,7 @@ var rootCmd = &cobra.Command{
 		if cfg, err = constructConfig(); err != nil {
 			return
 		}
+		log.Infof("install cni with configuration: \n%+v", cfg)
 
 		isReady := install.StartServer()
 
@@ -111,7 +112,7 @@ func registerBooleanParameter(name string, value bool, usage string) {
 
 func bindViper(name string) {
 	if err := viper.BindPFlag(name, rootCmd.Flags().Lookup(name)); err != nil {
-		log.Errora(err)
+		log.Error(err)
 		os.Exit(1)
 	}
 }
@@ -136,6 +137,8 @@ func constructConfig() (*config.Config, error) {
 		K8sServicePort:     os.Getenv("KUBERNETES_SERVICE_PORT"),
 		K8sNodeName:        os.Getenv("KUBERNETES_NODE_NAME"),
 
+		CNIBinSourceDir:   constants.CNIBinDir,
+		CNIBinTargetDirs:  []string{constants.HostCNIBinDir, constants.SecondaryBinDir},
 		UpdateCNIBinaries: viper.GetBool(constants.UpdateCNIBinaries),
 		SkipCNIBinaries:   viper.GetStringSlice(constants.SkipCNIBinaries),
 	}

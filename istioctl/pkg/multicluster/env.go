@@ -22,7 +22,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd/api"
 
 	"istio.io/istio/pkg/kube"
@@ -32,7 +31,7 @@ type ConditionFunc func() (done bool, err error)
 
 type Environment interface {
 	GetConfig() *api.Config
-	CreateClientSet(context string) (kubernetes.Interface, error)
+	CreateClient(context string) (kube.ExtendedClient, error)
 	Stdout() io.Writer
 	Stderr() io.Writer
 	ReadFile(filename string) ([]byte, error)
@@ -48,13 +47,18 @@ type KubeEnvironment struct {
 	kubeconfig string
 }
 
-func (e *KubeEnvironment) CreateClientSet(context string) (kubernetes.Interface, error) {
-	return kube.CreateClientset(e.kubeconfig, context)
+func (e *KubeEnvironment) CreateClient(context string) (kube.ExtendedClient, error) {
+	cfg, err := kube.BuildClientConfig(e.kubeconfig, context)
+	if err != nil {
+		return nil, err
+	}
+	return kube.NewExtendedClient(kube.NewClientConfigForRestConfig(cfg), "")
 }
 
 func (e *KubeEnvironment) Printf(format string, a ...interface{}) {
 	_, _ = fmt.Fprintf(e.stdout, format, a...)
 }
+
 func (e *KubeEnvironment) Errorf(format string, a ...interface{}) {
 	_, _ = fmt.Fprintf(e.stderr, format, a...)
 }

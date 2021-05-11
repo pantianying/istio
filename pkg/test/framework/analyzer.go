@@ -15,8 +15,11 @@
 package framework
 
 import (
+	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/hashicorp/go-multierror"
 
 	"istio.io/istio/pkg/test/env"
 	"istio.io/istio/pkg/test/framework/features"
@@ -29,15 +32,16 @@ import (
 type commonAnalyzer struct {
 	labels                  label.Set
 	minCusters, maxClusters int
-	skip                    string
+	minIstioVersion, skip   string
 }
 
 func newCommonAnalyzer() commonAnalyzer {
 	return commonAnalyzer{
-		labels:      label.NewSet(),
-		skip:        "",
-		minCusters:  1,
-		maxClusters: -1,
+		labels:          label.NewSet(),
+		skip:            "",
+		minIstioVersion: "",
+		minCusters:      1,
+		maxClusters:     -1,
 	}
 }
 
@@ -47,8 +51,7 @@ type suiteAnalyzer struct {
 	osExit func(int)
 
 	commonAnalyzer
-	envFactoryCalls    int
-	requiredEnvVersion string
+	envFactoryCalls int
 }
 
 func newSuiteAnalyzer(testID string, fn mRunFn, osExit func(int)) Suite {
@@ -95,8 +98,11 @@ func (s *suiteAnalyzer) RequireSingleCluster() Suite {
 	return s.RequireMinClusters(1).RequireMaxClusters(1)
 }
 
-func (s *suiteAnalyzer) RequireEnvironmentVersion(version string) Suite {
-	s.requiredEnvVersion = version
+func (s *suiteAnalyzer) RequireMinVersion(minorVersion uint) Suite {
+	return s
+}
+
+func (s *suiteAnalyzer) RequireMaxVersion(minorVersion uint) Suite {
 	return s
 }
 
@@ -154,24 +160,31 @@ func (t *testAnalyzer) Label(labels ...label.Instance) Test {
 }
 
 func (t *testAnalyzer) Features(feats ...features.Feature) Test {
+	if err := addFeatureLabels(t.featureLabels, feats...); err != nil {
+		log.Errorf(err)
+		t.goTest.FailNow()
+	}
+	return t
+}
+
+func addFeatureLabels(featureLabels map[features.Feature][]string, feats ...features.Feature) error {
 	c, err := features.BuildChecker(env.IstioSrc + "/pkg/test/framework/features/features.yaml")
 	if err != nil {
-		log.Errorf("Unable to build feature checker: %s", err)
-		t.goTest.FailNow()
-		return nil
+		return fmt.Errorf("unable to build feature checker: %v", err)
 	}
+
+	err = nil
 	for _, f := range feats {
 		check, scenario := c.Check(f)
 		if !check {
-			log.Errorf("feature %s is not present in /pkg/test/framework/features/features.yaml", f)
-			t.goTest.FailNow()
-			return nil
+			err = multierror.Append(err, fmt.Errorf("feature %s is not a leaf in /pkg/test/framework/features/features.yaml", f))
+			continue
 		}
 		// feats actually contains feature and scenario.  split them here.
 		onlyFeature := features.Feature(strings.Replace(string(f), scenario, "", 1))
-		t.featureLabels[onlyFeature] = append(t.featureLabels[onlyFeature], scenario)
+		featureLabels[onlyFeature] = append(featureLabels[onlyFeature], scenario)
 	}
-	return t
+	return err
 }
 
 func (t *testAnalyzer) NotImplementedYet(features ...features.Feature) Test {
@@ -187,6 +200,11 @@ func (t *testAnalyzer) RequiresMinClusters(minClusters int) Test {
 
 func (t *testAnalyzer) RequiresMaxClusters(maxClusters int) Test {
 	t.maxClusters = maxClusters
+	return t
+}
+
+func (t *testAnalyzer) RequireIstioVersion(version string) Test {
+	t.minIstioVersion = version
 	return t
 }
 

@@ -24,10 +24,10 @@ import (
 	. "github.com/onsi/gomega"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes/fake"
-	"k8s.io/client-go/tools/cache"
 
+	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pkg/kube"
+	"istio.io/istio/pkg/test/util/retry"
 )
 
 const secretNamespace string = "istio-system"
@@ -54,19 +54,20 @@ var (
 	deleted string
 )
 
-func addCallback(_ kube.Client, id string) error {
+func addCallback(id string, _ *Cluster) error {
 	mu.Lock()
 	defer mu.Unlock()
 	added = id
 	return nil
 }
 
-func updateCallback(_ kube.Client, id string) error {
+func updateCallback(id string, _ *Cluster) error {
 	mu.Lock()
 	defer mu.Unlock()
 	updated = id
 	return nil
 }
+
 func deleteCallback(id string) error {
 	mu.Lock()
 	defer mu.Unlock()
@@ -84,7 +85,8 @@ func Test_SecretController(t *testing.T) {
 	BuildClientsFromConfig = func(kubeConfig []byte) (kube.Client, error) {
 		return kube.NewFakeClient(), nil
 	}
-	clientset := fake.NewSimpleClientset()
+	features.RemoteClusterTimeout = 10 * time.Nanosecond
+	clientset := kube.NewFakeClient()
 
 	var (
 		secret0                        = makeSecret("s0", "c0", []byte("kubeconfig0-0"))
@@ -115,8 +117,15 @@ func Test_SecretController(t *testing.T) {
 
 	// Start the secret controller and sleep to allow secret process to start.
 	stopCh := make(chan struct{})
-	c := StartSecretController(clientset, addCallback, updateCallback, deleteCallback, secretNamespace)
-	cache.WaitForCacheSync(stopCh, c.informer.HasSynced)
+	t.Cleanup(func() {
+		close(stopCh)
+	})
+	c := StartSecretController(clientset, addCallback, updateCallback, deleteCallback, secretNamespace, time.Microsecond, stopCh)
+	t.Run("sync timeout", func(t *testing.T) {
+		retry.UntilOrFail(t, c.HasSynced, retry.Timeout(2*time.Second))
+	})
+	kube.WaitForCacheSyncInterval(stopCh, time.Microsecond, c.informer.HasSynced)
+	clientset.RunAndWait(stopCh)
 
 	for i, step := range steps {
 		resetCallbackData()

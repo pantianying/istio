@@ -1,3 +1,4 @@
+// +build integ
 // Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,13 +20,12 @@ import (
 	"time"
 
 	"istio.io/istio/pkg/config/protocol"
-
-	"istio.io/istio/pkg/test/framework/components/istio"
-
 	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/framework/components/echo"
 	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
+	"istio.io/istio/pkg/test/framework/components/istio"
 	"istio.io/istio/pkg/test/framework/components/namespace"
+	"istio.io/istio/pkg/test/framework/resource"
 	"istio.io/istio/pkg/test/util/retry"
 )
 
@@ -36,12 +36,12 @@ func TestMain(m *testing.M) {
 	framework.
 		NewSuite(m).
 		RequireSingleCluster().
-		Setup(istio.Setup(nil, func(cfg *istio.Config) {
+		Setup(istio.Setup(nil, func(_ resource.Context, cfg *istio.Config) {
 			cfg.ControlPlaneValues = `
 revision: stable
 `
 		})).
-		Setup(istio.Setup(nil, func(cfg *istio.Config) {
+		Setup(istio.Setup(nil, func(_ resource.Context, cfg *istio.Config) {
 			cfg.ControlPlaneValues = `
 profile: empty
 revision: canary
@@ -57,20 +57,20 @@ components:
 // belong to different control planes.
 func TestMultiRevision(t *testing.T) {
 	framework.NewTest(t).
-		Run(func(ctx framework.TestContext) {
-			stable := namespace.NewOrFail(t, ctx, namespace.Config{
+		Run(func(t framework.TestContext) {
+			stable := namespace.NewOrFail(t, t, namespace.Config{
 				Prefix:   "stable",
 				Inject:   true,
 				Revision: "stable",
 			})
-			canary := namespace.NewOrFail(t, ctx, namespace.Config{
+			canary := namespace.NewOrFail(t, t, namespace.Config{
 				Prefix:   "canary",
 				Inject:   true,
 				Revision: "canary",
 			})
 
 			var client, server echo.Instance
-			echoboot.NewBuilder(ctx).
+			echoboot.NewBuilder(t).
 				With(&client, echo.Config{
 					Service:   "client",
 					Namespace: stable,
@@ -84,7 +84,8 @@ func TestMultiRevision(t *testing.T) {
 							Name:         "http",
 							Protocol:     protocol.HTTP,
 							InstancePort: 8090,
-						}},
+						},
+					},
 				}).
 				BuildOrFail(t)
 			retry.UntilSuccessOrFail(t, func() error {

@@ -40,13 +40,11 @@ type operatorRemoveArgs struct {
 }
 
 func addOperatorRemoveFlags(cmd *cobra.Command, oiArgs *operatorRemoveArgs) {
-	cmd.PersistentFlags().StringVarP(&oiArgs.kubeConfigPath, "kubeconfig", "c", "", "Path to kube config")
-	cmd.PersistentFlags().StringVar(&oiArgs.context, "context", "", "The name of the kubeconfig context to use")
-	cmd.PersistentFlags().BoolVar(&oiArgs.force, "force", false, "Proceed even with errors")
-	cmd.PersistentFlags().StringVar(&oiArgs.operatorNamespace, "operatorNamespace", operatorDefaultNamespace,
-		"The namespace the operator controller is installed into")
-	cmd.PersistentFlags().StringVarP(&oiArgs.revision, "revision", "r", "",
-		revisionFlagHelpStr)
+	cmd.PersistentFlags().StringVarP(&oiArgs.kubeConfigPath, "kubeconfig", "c", "", KubeConfigFlagHelpStr)
+	cmd.PersistentFlags().StringVar(&oiArgs.context, "context", "", ContextFlagHelpStr)
+	cmd.PersistentFlags().BoolVar(&oiArgs.force, "force", false, ForceFlagHelpStr)
+	cmd.PersistentFlags().StringVar(&oiArgs.operatorNamespace, "operatorNamespace", operatorDefaultNamespace, OperatorNamespaceHelpstr)
+	cmd.PersistentFlags().StringVarP(&oiArgs.revision, "revision", "r", "", OperatorRevFlagHelpStr)
 }
 
 func operatorRemoveCmd(rootArgs *rootArgs, orArgs *operatorRemoveArgs) *cobra.Command {
@@ -58,7 +56,8 @@ func operatorRemoveCmd(rootArgs *rootArgs, orArgs *operatorRemoveArgs) *cobra.Co
 		Run: func(cmd *cobra.Command, args []string) {
 			l := clog.NewConsoleLogger(cmd.OutOrStdout(), cmd.OutOrStderr(), installerScope)
 			operatorRemove(rootArgs, orArgs, l)
-		}}
+		},
+	}
 }
 
 // operatorRemove removes the Istio operator controller from the cluster.

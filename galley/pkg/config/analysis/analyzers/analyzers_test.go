@@ -22,23 +22,23 @@ import (
 	"testing"
 	"time"
 
-	"istio.io/istio/galley/pkg/config/analysis/analyzers/destinationrule"
-
 	. "github.com/onsi/gomega"
-
-	"istio.io/pkg/log"
 
 	"istio.io/istio/galley/pkg/config/analysis"
 	"istio.io/istio/galley/pkg/config/analysis/analyzers/annotations"
 	"istio.io/istio/galley/pkg/config/analysis/analyzers/authz"
 	"istio.io/istio/galley/pkg/config/analysis/analyzers/deployment"
 	"istio.io/istio/galley/pkg/config/analysis/analyzers/deprecation"
+	"istio.io/istio/galley/pkg/config/analysis/analyzers/destinationrule"
 	"istio.io/istio/galley/pkg/config/analysis/analyzers/gateway"
 	"istio.io/istio/galley/pkg/config/analysis/analyzers/injection"
 	"istio.io/istio/galley/pkg/config/analysis/analyzers/multicluster"
+	schemaValidation "istio.io/istio/galley/pkg/config/analysis/analyzers/schema"
 	"istio.io/istio/galley/pkg/config/analysis/analyzers/service"
+	"istio.io/istio/galley/pkg/config/analysis/analyzers/serviceentry"
 	"istio.io/istio/galley/pkg/config/analysis/analyzers/sidecar"
 	"istio.io/istio/galley/pkg/config/analysis/analyzers/virtualservice"
+	"istio.io/istio/galley/pkg/config/analysis/analyzers/webhook"
 	"istio.io/istio/galley/pkg/config/analysis/diag"
 	"istio.io/istio/galley/pkg/config/analysis/local"
 	"istio.io/istio/galley/pkg/config/analysis/msg"
@@ -46,6 +46,8 @@ import (
 	"istio.io/istio/galley/pkg/config/scope"
 	"istio.io/istio/pkg/config/schema"
 	"istio.io/istio/pkg/config/schema/collection"
+	"istio.io/istio/pkg/config/schema/collections"
+	"istio.io/pkg/log"
 )
 
 type message struct {
@@ -76,11 +78,11 @@ var testGrid = []testCase{
 		analyzer: &annotations.K8sAnalyzer{},
 		expected: []message{
 			{msg.UnknownAnnotation, "Service httpbin"},
-			{msg.MisplacedAnnotation, "Service details"},
 			{msg.InvalidAnnotation, "Pod invalid-annotations"},
 			{msg.MisplacedAnnotation, "Pod grafana-test"},
 			{msg.MisplacedAnnotation, "Deployment fortio-deploy"},
 			{msg.MisplacedAnnotation, "Namespace staging"},
+			{msg.DeprecatedAnnotation, "Deployment fortio-deploy"},
 		},
 	},
 	{
@@ -151,6 +153,15 @@ var testGrid = []testCase{
 		},
 	},
 	{
+		name:       "conflicting gateways detect",
+		inputFiles: []string{"testdata/conflicting-gateways.yaml"},
+		analyzer:   &gateway.ConflictingGatewayAnalyzer{},
+		expected: []message{
+			{msg.ConflictingGateways, "Gateway alpha"},
+			{msg.ConflictingGateways, "Gateway beta"},
+		},
+	},
+	{
 		name:       "istioInjection",
 		inputFiles: []string{"testdata/injection.yaml"},
 		analyzer:   &injection.Analyzer{},
@@ -165,6 +176,17 @@ var testGrid = []testCase{
 		inputFiles: []string{
 			"testdata/injection-with-mismatched-sidecar.yaml",
 			"testdata/common/sidecar-injector-configmap.yaml",
+		},
+		analyzer: &injection.ImageAnalyzer{},
+		expected: []message{
+			{msg.IstioProxyImageMismatch, "Pod details-v1-pod-old.enabled-namespace"},
+		},
+	},
+	{
+		name: "istioInjectionProxyImageMismatchAbsolute",
+		inputFiles: []string{
+			"testdata/injection-with-mismatched-sidecar.yaml",
+			"testdata/sidecar-injector-configmap-absolute-override.yaml",
 		},
 		analyzer: &injection.ImageAnalyzer{},
 		expected: []message{
@@ -256,6 +278,10 @@ var testGrid = []testCase{
 		analyzer:   &virtualservice.GatewayAnalyzer{},
 		expected: []message{
 			{msg.ReferencedResourceNotFound, "VirtualService httpbin-bogus"},
+
+			{msg.VirtualServiceHostNotFoundInGateway, "VirtualService cross-test.default"},
+			{msg.VirtualServiceHostNotFoundInGateway, "VirtualService httpbin-bogus"},
+			{msg.VirtualServiceHostNotFoundInGateway, "VirtualService httpbin"},
 		},
 	},
 	{
@@ -267,6 +293,7 @@ var testGrid = []testCase{
 			{msg.DeploymentAssociatedToMultipleServices, "Deployment multiple-without-port.bookinfo"},
 			{msg.DeploymentRequiresServiceAssociated, "Deployment no-services.bookinfo"},
 			{msg.DeploymentRequiresServiceAssociated, "Deployment ann-enabled-ns-disabled.injection-disabled-ns"},
+			{msg.DeploymentConflictingPorts, "Deployment conflicting-ports.bookinfo"},
 		},
 	},
 	{
@@ -383,6 +410,128 @@ var testGrid = []testCase{
 		},
 		analyzer: &destinationrule.CaCertificateAnalyzer{},
 		expected: []message{},
+	},
+	{
+		name: "dupmatches",
+		inputFiles: []string{
+			"testdata/virtualservice_dupmatches.yaml",
+		},
+		analyzer: schemaValidation.CollectionValidationAnalyzer(collections.IstioNetworkingV1Alpha3Virtualservices),
+		expected: []message{
+			{msg.VirtualServiceUnreachableRule, "VirtualService duplicate-match"},
+			{msg.VirtualServiceUnreachableRule, "VirtualService sample-foo-cluster01.foo"},
+			{msg.VirtualServiceIneffectiveMatch, "VirtualService almost-duplicate-match"},
+			{msg.VirtualServiceIneffectiveMatch, "VirtualService duplicate-match"},
+
+			{msg.VirtualServiceUnreachableRule, "VirtualService duplicate-tcp-match"},
+			{msg.VirtualServiceUnreachableRule, "VirtualService duplicate-empty-tcp"},
+			{msg.VirtualServiceIneffectiveMatch, "VirtualService almost-duplicate-tcp-match"},
+			{msg.VirtualServiceIneffectiveMatch, "VirtualService duplicate-tcp-match"},
+
+			{msg.VirtualServiceUnreachableRule, "VirtualService tls-routing.none"},
+			{msg.VirtualServiceIneffectiveMatch, "VirtualService tls-routing-almostmatch.none"},
+			{msg.VirtualServiceIneffectiveMatch, "VirtualService tls-routing.none"},
+		},
+	},
+	{
+		name: "host defined in virtualservice not found in the gateway",
+		inputFiles: []string{
+			"testdata/virtualservice_host_not_found_gateway.yaml",
+		},
+		analyzer: &virtualservice.GatewayAnalyzer{},
+		expected: []message{
+			{msg.VirtualServiceHostNotFoundInGateway, "VirtualService testing-service-02-test-01.default"},
+			{msg.VirtualServiceHostNotFoundInGateway, "VirtualService testing-service-02-test-02.default"},
+			{msg.VirtualServiceHostNotFoundInGateway, "VirtualService testing-service-02-test-03.default"},
+			{msg.VirtualServiceHostNotFoundInGateway, "VirtualService testing-service-03-test-04.default"},
+		},
+	},
+	{
+		name: "missing Addresses and Protocol in Service Entry",
+		inputFiles: []string{
+			"testdata/serviceentry-missing-addresses-protocol.yaml",
+		},
+		analyzer: &serviceentry.ProtocolAdressesAnalyzer{},
+		expected: []message{
+			{msg.ServiceEntryAddressesRequired, "ServiceEntry service-entry-test-03.default"},
+			{msg.ServiceEntryAddressesRequired, "ServiceEntry service-entry-test-04.default"},
+			{msg.ServiceEntryAddressesRequired, "ServiceEntry service-entry-test-07.default"},
+		},
+	},
+	{
+		name: "certificate duplication in Gateway",
+		inputFiles: []string{
+			"testdata/gateway-duplicate-certificate.yaml",
+		},
+		analyzer: &gateway.CertificateAnalyzer{},
+		expected: []message{
+			{msg.GatewayDuplicateCertificate, "Gateway gateway-01-test-01.istio-system"},
+			{msg.GatewayDuplicateCertificate, "Gateway gateway-02-test-01.istio-system"},
+			{msg.GatewayDuplicateCertificate, "Gateway gateway-01-test-02.istio-system"},
+			{msg.GatewayDuplicateCertificate, "Gateway gateway-01-test-03.default"},
+		},
+	},
+	{
+		name: "webook",
+		inputFiles: []string{
+			"testdata/webhook.yaml",
+		},
+		analyzer: &webhook.Analyzer{},
+		expected: []message{
+			{msg.InvalidWebhook, "MutatingWebhookConfiguration istio-sidecar-injector-missing-overlap"},
+			{msg.InvalidWebhook, "MutatingWebhookConfiguration istio-sidecar-injector-missing-overlap"},
+			{msg.InvalidWebhook, "MutatingWebhookConfiguration istio-sidecar-injector-overlap"},
+		},
+	},
+	{
+		name: "Route Rule no effect on Ingress",
+		inputFiles: []string{
+			"testdata/virtualservice_route_rule_no_effects_ingress.yaml",
+		},
+		analyzer: &virtualservice.DestinationHostAnalyzer{},
+		expected: []message{
+			{msg.IngressRouteRulesNotAffected, "VirtualService testing-service-01-test-01.default"},
+		},
+	},
+	{
+		name: "Application Pod SecurityContext with UID 1337",
+		inputFiles: []string{
+			"testdata/pod-sec-uid.yaml",
+		},
+		analyzer: &deployment.ApplicationUIDAnalyzer{},
+		expected: []message{
+			{msg.InvalidApplicationUID, "Pod pod-sec-uid"},
+		},
+	},
+	{
+		name: "Application Container SecurityContext with UID 1337",
+		inputFiles: []string{
+			"testdata/pod-con-sec-uid.yaml",
+		},
+		analyzer: &deployment.ApplicationUIDAnalyzer{},
+		expected: []message{
+			{msg.InvalidApplicationUID, "Pod con-sec-uid"},
+		},
+	},
+	{
+		name: "Deployment Pod SecurityContext with UID 1337",
+		inputFiles: []string{
+			"testdata/deployment-pod-sec-uid.yaml",
+		},
+		analyzer: &deployment.ApplicationUIDAnalyzer{},
+		expected: []message{
+			{msg.InvalidApplicationUID, "Deployment deploy-pod-sec-uid"},
+		},
+	},
+	{
+		name: "Deployment Container SecurityContext with UID 1337",
+		inputFiles: []string{
+			"testdata/deployment-con-sec-uid.yaml",
+		},
+		analyzer: &deployment.ApplicationUIDAnalyzer{},
+		expected: []message{
+			{msg.InvalidApplicationUID, "Deployment deploy-con-sec-uid"},
+		},
 	},
 }
 

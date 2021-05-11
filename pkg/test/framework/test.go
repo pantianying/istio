@@ -16,17 +16,15 @@ package framework
 
 import (
 	"fmt"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"istio.io/pkg/log"
-
-	"istio.io/istio/pkg/test/env"
 	"istio.io/istio/pkg/test/framework/features"
 	"istio.io/istio/pkg/test/framework/label"
+	"istio.io/istio/pkg/test/framework/resource"
 	"istio.io/istio/pkg/test/scopes"
+	"istio.io/pkg/log"
 )
 
 type Test interface {
@@ -35,6 +33,9 @@ type Test interface {
 	// Label applies the given labels to this test.
 	Features(feats ...features.Feature) Test
 	NotImplementedYet(features ...features.Feature) Test
+	// RequireIstioVersion ensures that all installed versions of Istio are at least the
+	// required version for the annotated test to pass
+	RequireIstioVersion(version string) Test
 	// RequiresMinClusters ensures that the current environment contains at least the expected number of clusters.
 	// Otherwise it stops test execution and skips the test.
 	RequiresMinClusters(minClusters int) Test
@@ -44,7 +45,7 @@ type Test interface {
 	// RequiresSingleCluster this a utility that requires the min/max clusters to both = 1.
 	RequiresSingleCluster() Test
 	// Run the test, supplied as a lambda.
-	Run(fn func(ctx TestContext))
+	Run(fn func(t TestContext))
 	// RunParallel runs this test in parallel with other children of the same parent test/suite. Under the hood,
 	// this relies on Go's t.Parallel() and will, therefore, have the same behavior.
 	//
@@ -91,7 +92,7 @@ type Test interface {
 	// Since both T1 and T2 are non-parallel, they are run synchronously: T1 followed by T2. After T1 exits,
 	// T1a and T1b are run asynchronously with each other. After T1a and T1b complete, T2 is then run in the
 	// same way: T2 exits, then T2a and T2b are run asynchronously to completion.
-	RunParallel(fn func(ctx TestContext))
+	RunParallel(fn func(t TestContext))
 }
 
 // Test allows the test author to specify test-related metadata in a fluent-style, before commencing execution.
@@ -107,6 +108,7 @@ type testImpl struct {
 	s                   *suiteContext
 	requiredMinClusters int
 	requiredMaxClusters int
+	minIstioVersion     string
 
 	ctx *testContext
 
@@ -148,24 +150,10 @@ func (t *testImpl) Label(labels ...label.Instance) Test {
 }
 
 func (t *testImpl) Features(feats ...features.Feature) Test {
-	c, err := features.BuildChecker(env.IstioSrc + "/pkg/test/framework/features/features.yaml")
-	if err != nil {
-		log.Errorf("Unable to build feature checker: %s", err)
-		t.goTest.FailNow()
-		return nil
+	if err := addFeatureLabels(t.featureLabels, feats...); err != nil {
+		// test runs shouldn't fail
+		log.Errorf(err)
 	}
-	for _, f := range feats {
-		check, scenario := c.Check(f)
-		if !check {
-			log.Errorf("feature %s is not present in /pkg/test/framework/features/features.yaml", f)
-			t.goTest.FailNow()
-			return nil
-		}
-		// feats actually contains feature and scenario.  split them here.
-		onlyFeature := features.Feature(strings.Replace(string(f), scenario, "", 1))
-		t.featureLabels[onlyFeature] = append(t.featureLabels[onlyFeature], scenario)
-	}
-
 	return t
 }
 
@@ -188,6 +176,11 @@ func (t *testImpl) RequiresMaxClusters(maxClusters int) Test {
 
 func (t *testImpl) RequiresSingleCluster() Test {
 	return t.RequiresMaxClusters(1).RequiresMinClusters(1)
+}
+
+func (t *testImpl) RequireIstioVersion(version string) Test {
+	t.minIstioVersion = version
+	return t
 }
 
 func (t *testImpl) Run(fn func(ctx TestContext)) {
@@ -234,18 +227,29 @@ func (t *testImpl) doRun(ctx *testContext, fn func(ctx TestContext), parallel bo
 
 	t.ctx = ctx
 
-	if t.requiredMinClusters > 0 && len(t.s.Environment().Clusters()) < t.requiredMinClusters {
+	// we check kube for min clusters, these assume we're talking about real multicluster.
+	// it's possible to have 1 kube cluster then 1 non-kube cluster (vm for example)
+	if t.requiredMinClusters > 0 && len(t.s.Environment().Clusters().Kube()) < t.requiredMinClusters {
 		ctx.Done()
 		t.goTest.Skipf("Skipping %q: number of clusters %d is below required min %d",
 			t.goTest.Name(), len(t.s.Environment().Clusters()), t.requiredMinClusters)
 		return
 	}
 
+	// max clusters doesn't check kube only, the test may be written in a way that doesn't loop over all of Clusters()
 	if t.requiredMaxClusters > 0 && len(t.s.Environment().Clusters()) > t.requiredMaxClusters {
 		ctx.Done()
 		t.goTest.Skipf("Skipping %q: number of clusters %d is above required max %d",
 			t.goTest.Name(), len(t.s.Environment().Clusters()), t.requiredMaxClusters)
 		return
+	}
+
+	if t.minIstioVersion != "" {
+		if resource.IstioVersion(t.minIstioVersion).Compare(t.ctx.Settings().Revisions.Minimum()) > 0 {
+			ctx.Done()
+			t.goTest.Skipf("Skipping %q: running with min Istio version %q, test requires at least %s",
+				t.goTest.Name(), t.ctx.Settings().Revisions.Minimum(), t.minIstioVersion)
+		}
 	}
 
 	start := time.Now()

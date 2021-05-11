@@ -2,7 +2,7 @@
 title: v1alpha1
 layout: protoc-gen-docs
 generator: protoc-gen-docs
-number_of_entries: 57
+number_of_entries: 60
 ---
 <h2 id="ArchConfig">ArchConfig</h2>
 <section>
@@ -187,10 +187,45 @@ No
 No
 </td>
 </tr>
+<tr id="CNIConfig-taint">
+<td><code>taint</code></td>
+<td><code><a href="#CNITaintConfig">CNITaintConfig</a></code></td>
+<td>
+</td>
+<td>
+No
+</td>
+</tr>
 <tr id="CNIConfig-podAnnotations" class="deprecated ">
 <td><code>podAnnotations</code></td>
 <td><code><a href="#TypeMapStringInterface">TypeMapStringInterface</a></code></td>
 <td>
+</td>
+<td>
+No
+</td>
+</tr>
+</tbody>
+</table>
+</section>
+<h2 id="CNITaintConfig">CNITaintConfig</h2>
+<section>
+<table class="message-fields">
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Description</th>
+<th>Required</th>
+</tr>
+</thead>
+<tbody>
+<tr id="CNITaintConfig-enabled">
+<td><code>enabled</code></td>
+<td><code><a href="https://developers.google.com/protocol-buffers/docs/reference/google.protobuf#boolvalue">BoolValue</a></code></td>
+<td>
+<p>Controls whether taint behavior is enabled.</p>
+
 </td>
 <td>
 No
@@ -365,208 +400,6 @@ No
 <td><code>requests</code></td>
 <td><code>map&lt;string,&nbsp;string&gt;</code></td>
 <td>
-</td>
-<td>
-No
-</td>
-</tr>
-</tbody>
-</table>
-</section>
-<h2 id="CoreDNSConfig">CoreDNSConfig</h2>
-<section>
-<p>Configuration for Core DNS.</p>
-
-<table class="message-fields">
-<thead>
-<tr>
-<th>Field</th>
-<th>Type</th>
-<th>Description</th>
-<th>Required</th>
-</tr>
-</thead>
-<tbody>
-<tr id="CoreDNSConfig-enabled">
-<td><code>enabled</code></td>
-<td><code><a href="https://developers.google.com/protocol-buffers/docs/reference/google.protobuf#boolvalue">BoolValue</a></code></td>
-<td>
-<p>Controls whether CoreDNS is enabled.</p>
-
-</td>
-<td>
-No
-</td>
-</tr>
-<tr id="CoreDNSConfig-coreDNSImage">
-<td><code>coreDNSImage</code></td>
-<td><code>string</code></td>
-<td>
-<p>Image for Core DNS.</p>
-
-</td>
-<td>
-No
-</td>
-</tr>
-<tr id="CoreDNSConfig-coreDNSTag">
-<td><code>coreDNSTag</code></td>
-<td><code>string</code></td>
-<td>
-</td>
-<td>
-No
-</td>
-</tr>
-<tr id="CoreDNSConfig-coreDNSPluginImage">
-<td><code>coreDNSPluginImage</code></td>
-<td><code>string</code></td>
-<td>
-</td>
-<td>
-No
-</td>
-</tr>
-<tr id="CoreDNSConfig-autoscaleEnabled">
-<td><code>autoscaleEnabled</code></td>
-<td><code><a href="https://developers.google.com/protocol-buffers/docs/reference/google.protobuf#boolvalue">BoolValue</a></code></td>
-<td>
-<p>Controls whether auto scaling with a HorizontalPodAutoscaler is enabled.</p>
-
-</td>
-<td>
-No
-</td>
-</tr>
-<tr id="CoreDNSConfig-autoscaleMax">
-<td><code>autoscaleMax</code></td>
-<td><code>uint32</code></td>
-<td>
-<p>maxReplicas setting for HorizontalPodAutoscaler.</p>
-
-</td>
-<td>
-No
-</td>
-</tr>
-<tr id="CoreDNSConfig-autoscaleMin">
-<td><code>autoscaleMin</code></td>
-<td><code>uint32</code></td>
-<td>
-<p>minReplicas setting for HorizontalPodAutoscaler.</p>
-
-</td>
-<td>
-No
-</td>
-</tr>
-<tr id="CoreDNSConfig-nodeSelector" class="deprecated ">
-<td><code>nodeSelector</code></td>
-<td><code><a href="#TypeMapStringInterface">TypeMapStringInterface</a></code></td>
-<td>
-<p>K8s node selector.</p>
-
-<p>See https://kubernetes.io/docs/concepts/configuration/assign-pod-node/#nodeselector</p>
-
-</td>
-<td>
-No
-</td>
-</tr>
-<tr id="CoreDNSConfig-replicaCount" class="deprecated ">
-<td><code>replicaCount</code></td>
-<td><code>uint32</code></td>
-<td>
-<p>Number of replicas for Core DNS.</p>
-
-</td>
-<td>
-No
-</td>
-</tr>
-<tr id="CoreDNSConfig-podAnnotations" class="deprecated ">
-<td><code>podAnnotations</code></td>
-<td><code><a href="#TypeMapStringInterface">TypeMapStringInterface</a></code></td>
-<td>
-<p>K8s annotations for pods.</p>
-
-<p>See: https://kubernetes.io/docs/concepts/overview/working-with-objects/annotations/</p>
-
-</td>
-<td>
-No
-</td>
-</tr>
-<tr id="CoreDNSConfig-resources" class="deprecated ">
-<td><code>resources</code></td>
-<td><code><a href="#Resources">Resources</a></code></td>
-<td>
-<p>K8s resources settings.</p>
-
-<p>See https://kubernetes.io/docs/concepts/configuration/manage-compute-resources-container/#resource-requests-and-limits-of-pod-and-container</p>
-
-</td>
-<td>
-No
-</td>
-</tr>
-<tr id="CoreDNSConfig-rollingMaxSurge" class="deprecated ">
-<td><code>rollingMaxSurge</code></td>
-<td><code><a href="#TypeIntOrStringForPB">TypeIntOrStringForPB</a></code></td>
-<td>
-<p>K8s rolling update strategy</p>
-
-</td>
-<td>
-No
-</td>
-</tr>
-<tr id="CoreDNSConfig-rollingMaxUnavailable" class="deprecated ">
-<td><code>rollingMaxUnavailable</code></td>
-<td><code><a href="#TypeIntOrStringForPB">TypeIntOrStringForPB</a></code></td>
-<td>
-<p>K8s rolling update strategy</p>
-
-</td>
-<td>
-No
-</td>
-</tr>
-<tr id="CoreDNSConfig-podAntiAffinityLabelSelector" class="deprecated ">
-<td><code>podAntiAffinityLabelSelector</code></td>
-<td><code><a href="#TypeSliceOfMapStringInterface">TypeSliceOfMapStringInterface</a></code></td>
-<td>
-</td>
-<td>
-No
-</td>
-</tr>
-<tr id="CoreDNSConfig-podAntiAffinityTermLabelSelector" class="deprecated ">
-<td><code>podAntiAffinityTermLabelSelector</code></td>
-<td><code><a href="#TypeSliceOfMapStringInterface">TypeSliceOfMapStringInterface</a></code></td>
-<td>
-</td>
-<td>
-No
-</td>
-</tr>
-<tr id="CoreDNSConfig-tolerations" class="deprecated ">
-<td><code>tolerations</code></td>
-<td><code><a href="#TypeSliceOfMapStringInterface">TypeSliceOfMapStringInterface</a></code></td>
-<td>
-</td>
-<td>
-No
-</td>
-</tr>
-<tr id="CoreDNSConfig-cpu" class="deprecated ">
-<td><code>cpu</code></td>
-<td><code><a href="#CPUTargetUtilizationConfig">CPUTargetUtilizationConfig</a></code></td>
-<td>
-<p>K8s utilization setting for HorizontalPodAutoscaler target.</p>
-
-<p>See https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/</p>
-
 </td>
 <td>
 No
@@ -1108,17 +941,6 @@ No
 No
 </td>
 </tr>
-<tr id="GlobalConfig-meshExpansion">
-<td><code>meshExpansion</code></td>
-<td><code><a href="#MeshExpansionConfig">MeshExpansionConfig</a></code></td>
-<td>
-<p>Specifies the Configuration for Istio mesh expansion to bare metal.</p>
-
-</td>
-<td>
-No
-</td>
-</tr>
 <tr id="GlobalConfig-meshID">
 <td><code>meshID</code></td>
 <td><code>string</code></td>
@@ -1284,17 +1106,6 @@ No
 No
 </td>
 </tr>
-<tr id="GlobalConfig-trustDomain">
-<td><code>trustDomain</code></td>
-<td><code>string</code></td>
-<td>
-<p>Specifies the trust domain that corresponds to the root cert of CA.</p>
-
-</td>
-<td>
-No
-</td>
-</tr>
 <tr id="GlobalConfig-useMCP">
 <td><code>useMCP</code></td>
 <td><code><a href="https://developers.google.com/protocol-buffers/docs/reference/google.protobuf#boolvalue">BoolValue</a></code></td>
@@ -1396,11 +1207,11 @@ No
 No
 </td>
 </tr>
-<tr id="GlobalConfig-centralIstiod">
-<td><code>centralIstiod</code></td>
+<tr id="GlobalConfig-externalIstiod">
+<td><code>externalIstiod</code></td>
 <td><code><a href="https://developers.google.com/protocol-buffers/docs/reference/google.protobuf#boolvalue">BoolValue</a></code></td>
 <td>
-<p>Controls whether one central istiod is enabled.</p>
+<p>Controls whether one external istiod is enabled.</p>
 
 </td>
 <td>
@@ -1652,15 +1463,6 @@ No
 <tr id="IngressGatewayConfig-loadBalancerSourceRanges">
 <td><code>loadBalancerSourceRanges</code></td>
 <td><code>string[]</code></td>
-<td>
-</td>
-<td>
-No
-</td>
-</tr>
-<tr id="IngressGatewayConfig-meshExpansionPorts">
-<td><code>meshExpansionPorts</code></td>
-<td><code><a href="#PortsConfig">PortsConfig[]</a></code></td>
 <td>
 </td>
 <td>
@@ -1934,45 +1736,6 @@ No
 </tbody>
 </table>
 </section>
-<h2 id="MeshExpansionConfig">MeshExpansionConfig</h2>
-<section>
-<p>Configuration for Istio mesh expansion to bare metal.</p>
-
-<table class="message-fields">
-<thead>
-<tr>
-<th>Field</th>
-<th>Type</th>
-<th>Description</th>
-<th>Required</th>
-</tr>
-</thead>
-<tbody>
-<tr id="MeshExpansionConfig-enabled">
-<td><code>enabled</code></td>
-<td><code><a href="https://developers.google.com/protocol-buffers/docs/reference/google.protobuf#boolvalue">BoolValue</a></code></td>
-<td>
-<p>Exposes Pilot and Citadel mTLS on the ingress gateway.</p>
-
-</td>
-<td>
-No
-</td>
-</tr>
-<tr id="MeshExpansionConfig-useILB">
-<td><code>useILB</code></td>
-<td><code><a href="https://developers.google.com/protocol-buffers/docs/reference/google.protobuf#boolvalue">BoolValue</a></code></td>
-<td>
-<p>Exposes Pilot and Citadel mTLS and the plain text Pilot ports on an internal gateway.</p>
-
-</td>
-<td>
-No
-</td>
-</tr>
-</tbody>
-</table>
-</section>
 <h2 id="MultiClusterConfig">MultiClusterConfig</h2>
 <section>
 <p>MultiClusterConfig specifies the Configuration for Istio mesh across multiple clusters through the istio gateways.</p>
@@ -2002,6 +1765,24 @@ No
 <tr id="MultiClusterConfig-clusterName">
 <td><code>clusterName</code></td>
 <td><code>string</code></td>
+<td>
+</td>
+<td>
+No
+</td>
+</tr>
+<tr id="MultiClusterConfig-globalDomainSuffix">
+<td><code>globalDomainSuffix</code></td>
+<td><code>string</code></td>
+<td>
+</td>
+<td>
+No
+</td>
+</tr>
+<tr id="MultiClusterConfig-includeEnvoyFilter">
+<td><code>includeEnvoyFilter</code></td>
+<td><code><a href="https://developers.google.com/protocol-buffers/docs/reference/google.protobuf#boolvalue">BoolValue</a></code></td>
 <td>
 </td>
 <td>
@@ -2621,6 +2402,17 @@ No
 No
 </td>
 </tr>
+<tr id="TelemetryV2PrometheusConfig-config_override">
+<td><code>configOverride</code></td>
+<td><code><a href="#TelemetryV2PrometheusConfig-ConfigOverride">ConfigOverride</a></code></td>
+<td>
+<p>Overrides default telemetry v2 filter configuration.</p>
+
+</td>
+<td>
+No
+</td>
+</tr>
 </tbody>
 </table>
 </section>
@@ -2640,15 +2432,6 @@ No
 <tbody>
 <tr id="TelemetryV2StackDriverConfig-enabled">
 <td><code>enabled</code></td>
-<td><code><a href="https://developers.google.com/protocol-buffers/docs/reference/google.protobuf#boolvalue">BoolValue</a></code></td>
-<td>
-</td>
-<td>
-No
-</td>
-</tr>
-<tr id="TelemetryV2StackDriverConfig-logging">
-<td><code>logging</code></td>
 <td><code><a href="https://developers.google.com/protocol-buffers/docs/reference/google.protobuf#boolvalue">BoolValue</a></code></td>
 <td>
 </td>
@@ -2686,6 +2469,33 @@ No
 <tr id="TelemetryV2StackDriverConfig-configOverride">
 <td><code>configOverride</code></td>
 <td><code><a href="#TypeMapStringInterface">TypeMapStringInterface</a></code></td>
+<td>
+</td>
+<td>
+No
+</td>
+</tr>
+<tr id="TelemetryV2StackDriverConfig-outboundAccessLogging">
+<td><code>outboundAccessLogging</code></td>
+<td><code><a href="#TelemetryV2StackDriverConfig-AccessLogging">AccessLogging</a></code></td>
+<td>
+</td>
+<td>
+No
+</td>
+</tr>
+<tr id="TelemetryV2StackDriverConfig-inboundAccessLogging">
+<td><code>inboundAccessLogging</code></td>
+<td><code><a href="#TelemetryV2StackDriverConfig-AccessLogging">AccessLogging</a></code></td>
+<td>
+</td>
+<td>
+No
+</td>
+</tr>
+<tr id="TelemetryV2StackDriverConfig-logging" class="deprecated ">
+<td><code>logging</code></td>
+<td><code><a href="https://developers.google.com/protocol-buffers/docs/reference/google.protobuf#boolvalue">BoolValue</a></code></td>
 <td>
 </td>
 <td>
@@ -2812,6 +2622,17 @@ No
 <td><code>int32</code></td>
 <td>
 <p>Target port number.</p>
+
+</td>
+<td>
+No
+</td>
+</tr>
+<tr id="PortsConfig-protocol">
+<td><code>protocol</code></td>
+<td><code>string</code></td>
+<td>
+<p>Protocol name.</p>
 
 </td>
 <td>
@@ -3029,17 +2850,6 @@ No
 No
 </td>
 </tr>
-<tr id="ProxyConfig-holdApplicationUntilProxyStarts">
-<td><code>holdApplicationUntilProxyStarts</code></td>
-<td><code><a href="https://developers.google.com/protocol-buffers/docs/reference/google.protobuf#boolvalue">BoolValue</a></code></td>
-<td>
-<p>Controls if sidecar is injected at the front of the container list and blocks the start of the other containers until the proxy is ready</p>
-
-</td>
-<td>
-No
-</td>
-</tr>
 <tr id="ProxyConfig-resources" class="deprecated ">
 <td><code>resources</code></td>
 <td><code><a href="#Resources">Resources</a></code></td>
@@ -3047,6 +2857,19 @@ No
 <p>K8s resources settings.</p>
 
 <p>See https://kubernetes.io/docs/concepts/configuration/manage-compute-resources-container/#resource-requests-and-limits-of-pod-and-container</p>
+
+</td>
+<td>
+No
+</td>
+</tr>
+<tr id="ProxyConfig-holdApplicationUntilProxyStarts" class="deprecated ">
+<td><code>holdApplicationUntilProxyStarts</code></td>
+<td><code><a href="https://developers.google.com/protocol-buffers/docs/reference/google.protobuf#boolvalue">BoolValue</a></code></td>
+<td>
+<p>Controls if sidecar is injected at the front of the container list and blocks the start of the other containers until the proxy is ready</p>
+
+<p>Deprecated: replaced by ProxyConfig setting which allows per-pod configuration of this behavior.</p>
 
 </td>
 <td>
@@ -3319,15 +3142,6 @@ No
 No
 </td>
 </tr>
-<tr id="SidecarInjectorConfig-injectLabel">
-<td><code>injectLabel</code></td>
-<td><code>string</code></td>
-<td>
-</td>
-<td>
-No
-</td>
-</tr>
 <tr id="SidecarInjectorConfig-injectedAnnotations">
 <td><code>injectedAnnotations</code></td>
 <td><code><a href="#TypeMapStringInterface">TypeMapStringInterface</a></code></td>
@@ -3356,6 +3170,38 @@ No
 <td><code>string</code></td>
 <td>
 <p>Configure the injection url for sidecar injector webhook</p>
+
+</td>
+<td>
+No
+</td>
+</tr>
+<tr id="SidecarInjectorConfig-templates">
+<td><code>templates</code></td>
+<td><code><a href="#TypeMapStringInterface">TypeMapStringInterface</a></code></td>
+<td>
+<p>Templates defines a set of custom injection templates that can be used. For example, defining:</p>
+
+<p>templates:
+  hello:
+   metadata
+     labels:
+       hello: world</p>
+
+<p>Then starting a pod with the <code>inject.istio.io/templates: hello</code> annotation, will result in the pod
+being injected with the hello=world labels.
+This is intended for advanced configuration only; most users should use the built in template</p>
+
+</td>
+<td>
+No
+</td>
+</tr>
+<tr id="SidecarInjectorConfig-defaultTemplates">
+<td><code>defaultTemplates</code></td>
+<td><code>string[]</code></td>
+<td>
+<p>defaultTemplates: [&ldquo;sidecar&rdquo;, &ldquo;hello&rdquo;]</p>
 
 </td>
 <td>
@@ -3618,6 +3464,17 @@ No
 No
 </td>
 </tr>
+<tr id="BaseConfig-enableIstioConfigCRDs">
+<td><code>enableIstioConfigCRDs</code></td>
+<td><code><a href="https://developers.google.com/protocol-buffers/docs/reference/google.protobuf#boolvalue">BoolValue</a></code></td>
+<td>
+<p>For istioctl usage to disable istio config crds in base</p>
+
+</td>
+<td>
+No
+</td>
+</tr>
 </tbody>
 </table>
 </section>
@@ -3662,15 +3519,6 @@ No
 <tr id="Values-cni">
 <td><code>cni</code></td>
 <td><code><a href="#CNIConfig">CNIConfig</a></code></td>
-<td>
-</td>
-<td>
-No
-</td>
-</tr>
-<tr id="Values-istiocoredns">
-<td><code>istiocoredns</code></td>
-<td><code><a href="#CoreDNSConfig">CoreDNSConfig</a></code></td>
 <td>
 </td>
 <td>
@@ -3724,15 +3572,6 @@ No
 No
 </td>
 </tr>
-<tr id="Values-clusterResources">
-<td><code>clusterResources</code></td>
-<td><code><a href="https://developers.google.com/protocol-buffers/docs/reference/google.protobuf#boolvalue">BoolValue</a></code></td>
-<td>
-</td>
-<td>
-No
-</td>
-</tr>
 <tr id="Values-istio_cni">
 <td><code>istioCni</code></td>
 <td><code><a href="#CNIConfig">CNIConfig</a></code></td>
@@ -3744,6 +3583,15 @@ No
 </tr>
 <tr id="Values-revision">
 <td><code>revision</code></td>
+<td><code>string</code></td>
+<td>
+</td>
+<td>
+No
+</td>
+</tr>
+<tr id="Values-ownerName">
+<td><code>ownerName</code></td>
 <td><code>string</code></td>
 <td>
 </td>
@@ -3845,6 +3693,54 @@ No
 <p>GOTYPE: interface{}</p>
 
 </section>
+<h2 id="TelemetryV2PrometheusConfig-ConfigOverride">TelemetryV2PrometheusConfig.ConfigOverride</h2>
+<section>
+<table class="message-fields">
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Description</th>
+<th>Required</th>
+</tr>
+</thead>
+<tbody>
+<tr id="TelemetryV2PrometheusConfig-ConfigOverride-gateway">
+<td><code>gateway</code></td>
+<td><code><a href="#TypeMapStringInterface">TypeMapStringInterface</a></code></td>
+<td>
+<p>Overrides default gateway telemetry v2 configuration.</p>
+
+</td>
+<td>
+No
+</td>
+</tr>
+<tr id="TelemetryV2PrometheusConfig-ConfigOverride-inboundSidecar">
+<td><code>inboundSidecar</code></td>
+<td><code><a href="#TypeMapStringInterface">TypeMapStringInterface</a></code></td>
+<td>
+<p>Overrides default inbound sidecar telemetry v2 configuration.</p>
+
+</td>
+<td>
+No
+</td>
+</tr>
+<tr id="TelemetryV2PrometheusConfig-ConfigOverride-outboundSidecar">
+<td><code>outboundSidecar</code></td>
+<td><code><a href="#TypeMapStringInterface">TypeMapStringInterface</a></code></td>
+<td>
+<p>Overrides default outbound sidecar telemetry v2 configuration.</p>
+
+</td>
+<td>
+No
+</td>
+</tr>
+</tbody>
+</table>
+</section>
 <h2 id="OutboundTrafficPolicyConfig-Mode">OutboundTrafficPolicyConfig.Mode</h2>
 <section>
 <p>Specifies the sidecar&rsquo;s default behavior when handling outbound traffic from the application.</p>
@@ -3868,6 +3764,44 @@ No
 <td><code>REGISTRY_ONLY</code></td>
 <td>
 <p>Restrict outbound traffic to services defined in the service registry as well as those defined through ServiceEntries</p>
+
+</td>
+</tr>
+</tbody>
+</table>
+</section>
+<h2 id="TelemetryV2StackDriverConfig-AccessLogging">TelemetryV2StackDriverConfig.AccessLogging</h2>
+<section>
+<p>Types of Access logs to export.</p>
+
+<table class="enum-values">
+<thead>
+<tr>
+<th>Name</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr id="TelemetryV2StackDriverConfig-AccessLogging-NONE">
+<td><code>NONE</code></td>
+<td>
+<p>No Logs.</p>
+
+</td>
+</tr>
+<tr id="TelemetryV2StackDriverConfig-AccessLogging-FULL">
+<td><code>FULL</code></td>
+<td>
+<p>All logs including both success and error logs.</p>
+
+</td>
+</tr>
+<tr id="TelemetryV2StackDriverConfig-AccessLogging-ERRORS_ONLY">
+<td><code>ERRORS_ONLY</code></td>
+<td>
+<p>All error logs. This is currently only available for outbound/client side
+logs. A request is classified as error when <code>status&gt;=400 or
+response_flag != &quot;-&quot;</code></p>
 
 </td>
 </tr>
@@ -3949,6 +3883,11 @@ No
 <td>
 </td>
 </tr>
+<tr id="tracer-openCensusAgent">
+<td><code>openCensusAgent</code></td>
+<td>
+</td>
+</tr>
 </tbody>
 </table>
 </section>
@@ -4024,6 +3963,82 @@ No
 </tbody>
 </table>
 </section>
+<h2 id="TelemetryV2StackDriverConfig-AccessLogging">TelemetryV2StackDriverConfig.AccessLogging</h2>
+<section>
+<p>Types of Access logs to export.</p>
+
+<table class="enum-values">
+<thead>
+<tr>
+<th>Name</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr id="TelemetryV2StackDriverConfig-AccessLogging-NONE">
+<td><code>NONE</code></td>
+<td>
+<p>No Logs.</p>
+
+</td>
+</tr>
+<tr id="TelemetryV2StackDriverConfig-AccessLogging-FULL">
+<td><code>FULL</code></td>
+<td>
+<p>All logs including both success and error logs.</p>
+
+</td>
+</tr>
+<tr id="TelemetryV2StackDriverConfig-AccessLogging-ERRORS_ONLY">
+<td><code>ERRORS_ONLY</code></td>
+<td>
+<p>All error logs. This is currently only available for outbound/client side
+logs. A request is classified as error when <code>status&gt;=400 or
+response_flag != &quot;-&quot;</code></p>
+
+</td>
+</tr>
+</tbody>
+</table>
+</section>
+<h2 id="TelemetryV2StackDriverConfig-AccessLogging">TelemetryV2StackDriverConfig.AccessLogging</h2>
+<section>
+<p>Types of Access logs to export.</p>
+
+<table class="enum-values">
+<thead>
+<tr>
+<th>Name</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr id="TelemetryV2StackDriverConfig-AccessLogging-NONE">
+<td><code>NONE</code></td>
+<td>
+<p>No Logs.</p>
+
+</td>
+</tr>
+<tr id="TelemetryV2StackDriverConfig-AccessLogging-FULL">
+<td><code>FULL</code></td>
+<td>
+<p>All logs including both success and error logs.</p>
+
+</td>
+</tr>
+<tr id="TelemetryV2StackDriverConfig-AccessLogging-ERRORS_ONLY">
+<td><code>ERRORS_ONLY</code></td>
+<td>
+<p>All error logs. This is currently only available for outbound/client side
+logs. A request is classified as error when <code>status&gt;=400 or
+response_flag != &quot;-&quot;</code></p>
+
+</td>
+</tr>
+</tbody>
+</table>
+</section>
 <h2 id="tracer">tracer</h2>
 <section>
 <p>Specifies which tracer to use.</p>
@@ -4053,6 +4068,11 @@ No
 </tr>
 <tr id="tracer-stackdriver">
 <td><code>stackdriver</code></td>
+<td>
+</td>
+</tr>
+<tr id="tracer-openCensusAgent">
+<td><code>openCensusAgent</code></td>
 <td>
 </td>
 </tr>

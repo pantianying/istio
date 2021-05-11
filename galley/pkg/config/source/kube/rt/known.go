@@ -20,10 +20,11 @@ import (
 	"reflect"
 
 	"github.com/gogo/protobuf/proto"
+	webhookv1 "k8s.io/api/admissionregistration/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/api/extensions/v1beta1"
-	apiextensionv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	crdv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
@@ -336,10 +337,10 @@ func (p *Provider) initKnownAdapters() {
 		asTypesKey("apiextensions.k8s.io", "CustomResourceDefinition"): {
 			extractObject: defaultExtractObject,
 			extractResource: func(o interface{}) (proto.Message, error) {
-				if obj, ok := o.(*apiextensionv1.CustomResourceDefinition); ok {
+				if obj, ok := o.(*crdv1.CustomResourceDefinition); ok {
 					return &obj.Spec, nil
 				}
-				return nil, fmt.Errorf("unable to convert to v1.CustomResourceDefinition: %T", o)
+				return nil, fmt.Errorf("unable to convert to v1beta1.Ingress: %T", o)
 			},
 			newInformer: func() (cache.SharedIndexInformer, error) {
 				ext, err := p.interfaces.APIExtensionsClientset()
@@ -355,15 +356,53 @@ func (p *Provider) initKnownAdapters() {
 							return ext.ApiextensionsV1().CustomResourceDefinitions().Watch(context.TODO(), options)
 						},
 					},
-					&apiextensionv1.CustomResourceDefinition{},
+					&crdv1.CustomResourceDefinition{},
 					0,
 					cache.Indexers{})
 
 				return inf, nil
-
 			},
 			parseJSON: func(input []byte) (interface{}, error) {
-				out := &apiextensionv1.CustomResourceDefinition{}
+				out := &crdv1.CustomResourceDefinition{}
+				if _, _, err := deserializer.Decode(input, nil, out); err != nil {
+					return nil, err
+				}
+				return out, nil
+			},
+			getStatus: noStatus,
+			isEqual:   resourceVersionsMatch,
+			isBuiltIn: true,
+		},
+		asTypesKey("admissionregistration.k8s.io", "MutatingWebhookConfiguration"): {
+			extractObject: defaultExtractObject,
+			extractResource: func(o interface{}) (proto.Message, error) {
+				if obj, ok := o.(*webhookv1.MutatingWebhookConfiguration); ok {
+					return obj, nil
+				}
+				return nil, fmt.Errorf("unable to convert to webhookv1.MutatingWebhookConfiguration: %T", o)
+			},
+			newInformer: func() (cache.SharedIndexInformer, error) {
+				ext, err := p.interfaces.KubeClient()
+				if err != nil {
+					return nil, err
+				}
+				inf := cache.NewSharedIndexInformer(
+					&cache.ListWatch{
+						ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+							return ext.AdmissionregistrationV1().MutatingWebhookConfigurations().List(context.TODO(), options)
+						},
+						WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+							return ext.AdmissionregistrationV1().MutatingWebhookConfigurations().Watch(context.TODO(), options)
+						},
+					},
+					&crdv1.CustomResourceDefinition{},
+					0,
+					cache.Indexers{})
+
+				return inf, nil
+			},
+			parseJSON: func(input []byte) (interface{}, error) {
+				out := &webhookv1.MutatingWebhookConfiguration{}
 				if _, _, err := deserializer.Decode(input, nil, out); err != nil {
 					return nil, err
 				}

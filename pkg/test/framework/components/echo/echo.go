@@ -24,6 +24,7 @@ import (
 	"istio.io/istio/pkg/test"
 	"istio.io/istio/pkg/test/echo/client"
 	"istio.io/istio/pkg/test/echo/proto"
+	"istio.io/istio/pkg/test/framework/components/cluster"
 	"istio.io/istio/pkg/test/framework/resource"
 	"istio.io/istio/pkg/test/util/retry"
 )
@@ -47,14 +48,50 @@ type Builder interface {
 	// pointer will be updated to point at the new Instance.
 	With(i *Instance, cfg Config) Builder
 
+	// WithConfig mimics the behavior of With, but does not allow passing a reference
+	// and returns an echoboot builder rather than a generic echo builder.
+	// TODO rename this to With, and the old method to WithInstance
+	WithConfig(cfg Config) Builder
+
+	// WithClusters will cause subsequent With or WithConfig calls to be applied to the given clusters.
+	WithClusters(...cluster.Cluster) Builder
+
 	// Build and initialize all Echo Instances. Upon returning, the Instance pointers
 	// are assigned and all Instances are ready to communicate with each other.
 	Build() (Instances, error)
 	BuildOrFail(t test.Failer) Instances
 }
 
+type Caller interface {
+	// Call makes a call from this Instance to a target Instance.
+	Call(options CallOptions) (client.ParsedResponses, error)
+	CallOrFail(t test.Failer, options CallOptions) client.ParsedResponses
+
+	// CallWithRetry is the same as call, except that it will attempt to retry based on the provided
+	// options. If no options are provided, uses defaults.
+	CallWithRetry(options CallOptions, retryOptions ...retry.Option) (client.ParsedResponses, error)
+	CallWithRetryOrFail(t test.Failer, options CallOptions, retryOptions ...retry.Option) client.ParsedResponses
+}
+
+type Callers []Caller
+
+// Instances returns an Instances if all callers are Instance, otherwise returns nil.
+func (c Callers) Instances() Instances {
+	var out Instances
+	for _, caller := range c {
+		c, ok := caller.(Instance)
+		if !ok {
+			return nil
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
 // Instance is a component that provides access to a deployed echo service.
 type Instance interface {
+	Caller
+
 	resource.Resource
 
 	// Config returns the configuration of the Echo instance.
@@ -63,21 +100,13 @@ type Instance interface {
 	// Address of the service (e.g. Kubernetes cluster IP). May be "" if headless.
 	Address() string
 
-	// WaitUntilCallable waits until each of the provided instances are callable from
-	// this Instance. If this instance has a sidecar, this waits until Envoy has
-	// received outbound configuration (e.g. clusters, routes, listeners) for every
-	// port.
-	WaitUntilCallable(instances ...Instance) error
-	WaitUntilCallableOrFail(t test.Failer, instances ...Instance)
-
 	// Workloads retrieves the list of all deployed workloads for this Echo service.
 	// Guarantees at least one workload, if error == nil.
 	Workloads() ([]Workload, error)
 	WorkloadsOrFail(t test.Failer) []Workload
 
-	// Call makes a call from this Instance to a target Instance.
-	Call(options CallOptions) (client.ParsedResponses, error)
-	CallOrFail(t test.Failer, options CallOptions) client.ParsedResponses
+	// Restart restarts the workloads associated with this echo instance
+	Restart() error
 }
 
 // Workload port exposed by an Echo instance
@@ -90,6 +119,9 @@ type WorkloadPort struct {
 
 	// TLS determines whether the connection will be plain text or TLS. By default this is false (plain text).
 	TLS bool
+
+	// ServerFirst determines whether the port will use server first communication, meaning the client will not send the first byte.
+	ServerFirst bool
 }
 
 // Port exposed by an Echo Instance
@@ -111,10 +143,21 @@ type Port struct {
 
 	// TLS determines whether the connection will be plain text or TLS. By default this is false (plain text).
 	TLS bool
+
+	// ServerFirst determines whether the port will use server first communication, meaning the client will not send the first byte.
+	ServerFirst bool
+
+	// InstanceIP determines if echo will listen on the instance IP; otherwise, it will listen on wildcard
+	InstanceIP bool
+
+	// LocalhostIP determines if echo will listen on the localhost IP; otherwise, it will listen on wildcard
+	LocalhostIP bool
 }
 
 // Workload provides an interface for a single deployed echo server.
 type Workload interface {
+	// PodName gets the original pod name for the workload.
+	PodName() string
 	// Address returns the network address of the endpoint.
 	Address() string
 

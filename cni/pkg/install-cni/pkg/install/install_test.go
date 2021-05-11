@@ -27,7 +27,8 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"istio.io/istio/cni/pkg/install-cni/pkg/config"
-	"istio.io/istio/cni/pkg/install-cni/pkg/util"
+	testutils "istio.io/istio/pilot/test/util"
+	"istio.io/istio/pkg/file"
 )
 
 func TestCheckInstall(t *testing.T) {
@@ -37,14 +38,14 @@ func TestCheckInstall(t *testing.T) {
 		cniConfigFilename string
 		cniConfName       string
 		chainedCNIPlugin  bool
-		existingConfFiles []string
+		existingConfFiles map[string]string // {srcFilename: targetFilename, ...}
 	}{
 		{
 			name:              "preempted config",
 			expectedFailure:   true,
-			cniConfigFilename: "list.conflist.golden",
+			cniConfigFilename: "list.conflist",
 			chainedCNIPlugin:  true,
-			existingConfFiles: []string{"bridge.conf", "list.conflist.golden"},
+			existingConfFiles: map[string]string{"bridge.conf": "bridge.conf", "list.conflist.golden": "list.conflist"},
 		},
 		{
 			name:              "intentional preempted config invalid",
@@ -52,14 +53,14 @@ func TestCheckInstall(t *testing.T) {
 			cniConfigFilename: "invalid-arr.conflist",
 			cniConfName:       "invalid-arr.conflist",
 			chainedCNIPlugin:  true,
-			existingConfFiles: []string{"bridge.conf", "invalid-arr.conflist"},
+			existingConfFiles: map[string]string{"bridge.conf": "bridge.conf", "invalid-arr.conflist": "invalid-arr.conflist"},
 		},
 		{
 			name:              "intentional preempted config",
-			cniConfigFilename: "list.conflist.golden",
-			cniConfName:       "list.conflist.golden",
+			cniConfigFilename: "list.conflist",
+			cniConfName:       "list.conflist",
 			chainedCNIPlugin:  true,
-			existingConfFiles: []string{"bridge.conf", "list.conflist.golden"},
+			existingConfFiles: map[string]string{"bridge.conf": "bridge.conf", "list.conflist.golden": "list.conflist"},
 		},
 		{
 			name:              "CNI config file removed",
@@ -71,18 +72,24 @@ func TestCheckInstall(t *testing.T) {
 			expectedFailure:   true,
 			cniConfigFilename: "list.conflist",
 			chainedCNIPlugin:  true,
-			existingConfFiles: []string{"list.conflist"},
+			existingConfFiles: map[string]string{"list.conflist": "list.conflist"},
 		},
 		{
-			name:              "standalone istio-cni config not in CNI config file",
+			name:              "chained CNI plugin",
+			cniConfigFilename: "list.conflist",
+			chainedCNIPlugin:  true,
+			existingConfFiles: map[string]string{"list.conflist.golden": "list.conflist"},
+		},
+		{
+			name:              "standalone CNI plugin istio-cni config not in CNI config file",
 			expectedFailure:   true,
 			cniConfigFilename: "bridge.conf",
-			existingConfFiles: []string{"bridge.conf"},
+			existingConfFiles: map[string]string{"bridge.conf": "bridge.conf"},
 		},
 		{
-			name:              "standalone istio-cni config",
+			name:              "standalone CNI plugin",
 			cniConfigFilename: "istio-cni.conf",
-			existingConfFiles: []string{"istio-cni.conf"},
+			existingConfFiles: map[string]string{"istio-cni.conf": "istio-cni.conf"},
 		},
 	}
 
@@ -100,7 +107,11 @@ func TestCheckInstall(t *testing.T) {
 			}()
 
 			// Create existing config files if specified in test case
-			util.CopyExistingConfFiles(t, tempDir, c.existingConfFiles...)
+			for srcFilename, targetFilename := range c.existingConfFiles {
+				if err := file.AtomicCopy(filepath.Join("testdata", srcFilename), tempDir, targetFilename); err != nil {
+					t.Fatal(err)
+				}
+			}
 
 			cfg := &config.Config{
 				MountedCNINetDir: tempDir,
@@ -163,7 +174,7 @@ func TestSleepCheckInstall(t *testing.T) {
 
 			if len(c.invalidConfigFilename) > 0 {
 				// Copy an invalid config file into tempDir
-				if err = util.AtomicCopy(filepath.Join("testdata", c.invalidConfigFilename), tempDir, c.cniConfigFilename); err != nil {
+				if err = file.AtomicCopy(filepath.Join("testdata", c.invalidConfigFilename), tempDir, c.cniConfigFilename); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -180,8 +191,8 @@ func TestSleepCheckInstall(t *testing.T) {
 				}
 			}
 
-			// Copy an valid config file into tempDir
-			if err = util.AtomicCopy(filepath.Join("testdata", c.validConfigFilename), tempDir, c.cniConfigFilename); err != nil {
+			// Copy a valid config file into tempDir
+			if err = file.AtomicCopy(filepath.Join("testdata", c.validConfigFilename), tempDir, c.cniConfigFilename); err != nil {
 				t.Fatal(err)
 			}
 
@@ -224,7 +235,7 @@ func TestSleepCheckInstall(t *testing.T) {
 			// Remove Istio CNI's config
 			t.Log("Expecting an invalid configuration log:")
 			if len(c.invalidConfigFilename) > 0 {
-				if err = util.AtomicCopy(filepath.Join("testdata", c.invalidConfigFilename), tempDir, c.cniConfigFilename); err != nil {
+				if err = file.AtomicCopy(filepath.Join("testdata", c.invalidConfigFilename), tempDir, c.cniConfigFilename); err != nil {
 					t.Fatal(err)
 				}
 			} else {
@@ -243,6 +254,111 @@ func TestSleepCheckInstall(t *testing.T) {
 				assert.Falsef(t, isReady.Load().(bool), "isReady should have been set to false after returning from sleepCheckInstall")
 			case <-time.After(5 * time.Second):
 				t.Fatal("timed out waiting for invalid configuration to be detected")
+			}
+		})
+	}
+}
+
+func TestCleanup(t *testing.T) {
+	cases := []struct {
+		name                   string
+		expectedFailure        bool
+		chainedCNIPlugin       bool
+		configFilename         string
+		existingConfigFilename string
+		expectedConfigFilename string
+	}{
+		{
+			name:                   "chained CNI plugin",
+			chainedCNIPlugin:       true,
+			configFilename:         "list.conflist",
+			existingConfigFilename: "list-with-istio.conflist",
+			expectedConfigFilename: "list-no-istio.conflist",
+		},
+		{
+			name:                   "standalone CNI plugin",
+			configFilename:         "istio-cni.conf",
+			existingConfigFilename: "istio-cni.conf",
+		},
+	}
+
+	for i, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			// Create temp directory for files
+			cniNetDir, err := ioutil.TempDir("", fmt.Sprintf("test-case-%d-cni-net", i))
+			if err != nil {
+				t.Fatal(err)
+			}
+			cniBinDir, err := ioutil.TempDir("", fmt.Sprintf("test-case-%d-cni-bin", i))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				err1 := os.RemoveAll(cniNetDir)
+				err2 := os.RemoveAll(cniBinDir)
+				if err1 != nil {
+					t.Fatal(err1)
+				} else if err2 != nil {
+					t.Fatal(err1)
+				}
+			}()
+
+			// Create existing config file if specified in test case
+			cniConfigFilePath := filepath.Join(cniNetDir, c.configFilename)
+			if err := file.AtomicCopy(filepath.Join("testdata", c.existingConfigFilename), cniNetDir, c.configFilename); err != nil {
+				t.Fatal(err)
+			}
+
+			// Create existing binary files
+			for _, filename := range []string{"istio-cni", "istio-iptables"} {
+				if err := ioutil.WriteFile(filepath.Join(cniBinDir, filename), []byte{1, 2, 3}, 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			// Create kubeconfig
+			kubeConfigFilePath := filepath.Join(cniNetDir, "kubeconfig")
+			if err := ioutil.WriteFile(kubeConfigFilePath, []byte{1, 2, 3}, 0755); err != nil {
+				t.Fatal(err)
+			}
+
+			cfg := &config.Config{
+				MountedCNINetDir: cniNetDir,
+				ChainedCNIPlugin: c.chainedCNIPlugin,
+				CNIBinTargetDirs: []string{cniBinDir},
+			}
+
+			isReady := &atomic.Value{}
+			isReady.Store(false)
+			installer := NewInstaller(cfg, isReady)
+			installer.cniConfigFilepath = cniConfigFilePath
+			installer.kubeconfigFilepath = kubeConfigFilePath
+			err = installer.Cleanup()
+			if (c.expectedFailure && err == nil) || (!c.expectedFailure && err != nil) {
+				t.Fatalf("expected failure: %t, got %v", c.expectedFailure, err)
+			}
+
+			// check if conf file is deleted/conflist file is updated
+			if c.chainedCNIPlugin {
+				resultConfig := testutils.ReadFile(cniConfigFilePath, t)
+
+				goldenFilepath := filepath.Join("testdata", c.expectedConfigFilename)
+				goldenConfig := testutils.ReadFile(goldenFilepath, t)
+				testutils.CompareBytes(resultConfig, goldenConfig, goldenFilepath, t)
+			} else if file.Exists(cniConfigFilePath) {
+				t.Fatalf("file %s was not deleted", c.configFilename)
+			}
+
+			// check if kubeconfig is deleted
+			if file.Exists(kubeConfigFilePath) {
+				t.Fatal("kubeconfig was not deleted")
+			}
+
+			// check if binaries are deleted
+			for _, filename := range []string{"istio-cni", "istio-iptables"} {
+				if file.Exists(filepath.Join(cniBinDir, filename)) {
+					t.Fatalf("File %s was not deleted", filename)
+				}
 			}
 		})
 	}

@@ -1,3 +1,4 @@
+// +build integ
 // Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,10 +19,10 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"testing"
 	"time"
 
 	"istio.io/istio/pkg/test/echo/common/response"
+	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/util/retry"
 	"istio.io/istio/tests/integration/security/util/connection"
 )
@@ -72,8 +73,11 @@ func (tc TestCase) CheckRBACRequest() error {
 		if err != nil {
 			return getError(req, "allow with code 200", fmt.Sprintf("error: %v", err))
 		}
+		if req.DestClusters.IsMulticluster() {
+			return resp.CheckReachedClusters(req.DestClusters)
+		}
 	} else {
-		if req.Options.PortName == "tcp" || req.Options.PortName == "grpc" {
+		if strings.HasPrefix(req.Options.PortName, "tcp") || req.Options.PortName == "grpc" {
 			expectedErrMsg := "EOF" // TCP deny message.
 			if req.Options.PortName == "grpc" {
 				expectedErrMsg = "rpc error: code = PermissionDenied desc = RBAC: access denied"
@@ -101,7 +105,7 @@ func (tc TestCase) CheckRBACRequest() error {
 	return nil
 }
 
-func RunRBACTest(t *testing.T, cases []TestCase) {
+func RunRBACTest(ctx framework.TestContext, cases []TestCase) {
 	for _, tc := range cases {
 		want := "deny"
 		if tc.ExpectAllowed {
@@ -114,7 +118,12 @@ func RunRBACTest(t *testing.T, cases []TestCase) {
 			tc.Request.Options.PortName,
 			tc.Request.Options.Path,
 			want)
-		t.Run(testName, func(t *testing.T) {
+		ctx.NewSubTest(testName).Run(func(t framework.TestContext) {
+			// Current source ip based authz test cases are not required in multicluster setup
+			// because cross-network traffic will lose the origin source ip info
+			if strings.Contains(testName, "source-ip") && t.Clusters().IsMulticluster() {
+				t.Skip()
+			}
 			retry.UntilSuccessOrFail(t, tc.CheckRBACRequest,
 				retry.Delay(250*time.Millisecond), retry.Timeout(30*time.Second))
 		})

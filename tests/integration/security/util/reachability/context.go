@@ -1,3 +1,4 @@
+// +build integ
 // Copyright Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,17 +21,12 @@ import (
 	"strings"
 	"time"
 
-	"istio.io/pkg/log"
-
-	"istio.io/istio/pkg/test/framework/components/istioctl"
-	"istio.io/istio/pkg/test/util/retry"
-
 	"istio.io/istio/pkg/test/echo/common/scheme"
 	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/framework/components/echo"
-	"istio.io/istio/pkg/test/framework/components/echo/echoboot"
 	"istio.io/istio/pkg/test/framework/components/namespace"
 	"istio.io/istio/pkg/test/util/file"
+	"istio.io/istio/pkg/test/util/retry"
 	"istio.io/istio/tests/integration/security/util"
 	"istio.io/istio/tests/integration/security/util/connection"
 )
@@ -51,80 +47,25 @@ type TestCase struct {
 	Include func(src echo.Instance, opts echo.CallOptions) bool
 
 	// Handler called when the given test is being run.
-	OnRun func(ctx framework.TestContext, src echo.Instance, opts echo.CallOptions)
+	OnRun func(t framework.TestContext, src echo.Instance, opts echo.CallOptions)
 
 	// Indicates whether the test should expect a successful response.
 	ExpectSuccess func(src echo.Instance, opts echo.CallOptions) bool
-}
 
-// Context is a context for reachability tests.
-type Context struct {
-	ctx           framework.TestContext
-	Namespace     namespace.Instance
-	A, B          echo.Instance
-	Multiversion  echo.Instance
-	Headless      echo.Instance
-	Naked         echo.Instance
-	VM            echo.Instance
-	HeadlessNaked echo.Instance
-}
+	// Allows filtering the destinations we expect to reach (optional).
+	ExpectDestinations func(src echo.Instance, dest echo.Instances) echo.Instances
 
-// CreateContext creates and initializes reachability context.
-func CreateContext(ctx framework.TestContext, buildVM bool) Context {
-	ns := namespace.NewOrFail(ctx, ctx, namespace.Config{
-		Prefix: "reachability",
-		Inject: true,
-	})
+	// Indicates whether the test should expect a MTLS response.
+	ExpectMTLS func(src echo.Instance, opts echo.CallOptions) bool
 
-	var a, b, multiVersion, headless, naked, vmInstance, headlessNaked echo.Instance
-
-	// Multi-version specific setup
-	cfg := util.EchoConfig("multiversion", ns, false, nil)
-	cfg.Subsets = []echo.SubsetConfig{
-		// Istio deployment, with sidecar.
-		{
-			Version: "vistio",
-		},
-		// Legacy deployment subset, does not have sidecar injected.
-		{
-			Version:     "vlegacy",
-			Annotations: echo.NewAnnotations().SetBool(echo.SidecarInject, false),
-		},
-	}
-
-	// VM specific setup
-	vmCfg := util.EchoConfig("vm", ns, false, nil)
-
-	// for test cases that have `buildVM` off, vm will function like a regular pod
-	vmCfg.DeployAsVM = buildVM
-
-	echoboot.NewBuilder(ctx).
-		With(&a, util.EchoConfig("a", ns, false, nil)).
-		With(&b, util.EchoConfig("b", ns, false, nil)).
-		With(&multiVersion, cfg).
-		With(&headless, util.EchoConfig("headless", ns, true, nil)).
-		With(&naked, util.EchoConfig("naked", ns, false, echo.NewAnnotations().
-			SetBool(echo.SidecarInject, false))).
-		With(&vmInstance, vmCfg).
-		With(&headlessNaked, util.EchoConfig("headless-naked", ns, true, echo.NewAnnotations().
-			SetBool(echo.SidecarInject, false))).
-		BuildOrFail(ctx)
-
-	return Context{
-		ctx:           ctx,
-		Namespace:     ns,
-		A:             a,
-		B:             b,
-		Multiversion:  multiVersion,
-		Headless:      headless,
-		Naked:         naked,
-		VM:            vmInstance,
-		HeadlessNaked: headlessNaked,
-	}
+	// Indicates whether a test should be run in the multicluster environment.
+	// This is a temporary flag during the converting tests into multicluster supported.
+	// TODO: Remove this flag when all tests support multicluster
+	SkippedForMulticluster bool
 }
 
 // Run runs the given reachability test cases with the context.
-func (rc *Context) Run(testCases []TestCase) {
+func Run(testCases []TestCase, t framework.TestContext, apps *util.EchoDeployments) {
 	callOptions := []echo.CallOptions{
 		{
 			PortName: "http",
@@ -142,99 +83,140 @@ func (rc *Context) Run(testCases []TestCase) {
 			PortName: "grpc",
 			Scheme:   scheme.GRPC,
 		},
+		{
+			PortName: "https",
+			Scheme:   scheme.HTTPS,
+		},
 	}
 
-	ik := istioctl.NewOrFail(rc.ctx, rc.ctx, istioctl.Config{})
 	for _, c := range testCases {
 		// Create a copy to avoid races, as tests are run in parallel
 		c := c
+		if c.SkippedForMulticluster && t.Clusters().IsMulticluster() {
+			continue
+		}
 		testName := strings.TrimSuffix(c.ConfigFile, filepath.Ext(c.ConfigFile))
-		test := rc.ctx.NewSubTest(testName)
-
-		test.Run(func(ctx framework.TestContext) {
+		t.NewSubTest(testName).Run(func(t framework.TestContext) {
 			// Apply the policy.
-			policyYAML := file.AsStringOrFail(ctx, filepath.Join("./testdata", c.ConfigFile))
-			retry.UntilSuccessOrFail(ctx, func() error {
-				ctx.Logf("[%s] [%v] Apply config %s", testName, time.Now(), c.ConfigFile)
+			policyYAML := file.AsStringOrFail(t, filepath.Join("./testdata", c.ConfigFile))
+			retry.UntilSuccessOrFail(t, func() error {
+				t.Logf("[%s] [%v] Apply config %s", testName, time.Now(), c.ConfigFile)
 				// TODO(https://github.com/istio/istio/issues/20460) We shouldn't need a retry loop
-				return rc.ctx.Config().ApplyYAML(c.Namespace.Name(), policyYAML)
+				return t.Config().ApplyYAML(c.Namespace.Name(), policyYAML)
 			})
-			ctx.Logf("[%s] [%v] Wait for config propagate to endpoints...", testName, time.Now())
-			t0 := time.Now()
-			if err := ik.WaitForConfigs(c.Namespace.Name(), policyYAML); err != nil {
-				// Continue anyways, so we can assess the effectiveness of using `istioctl wait`
-				ctx.Logf("warning: failed to wait for config: %v", err)
-				// Get proxy status for additional debugging
-				s, _, _ := ik.Invoke([]string{"ps"})
-				ctx.Logf("proxy status: %v", s)
-			}
-			// TODO(https://github.com/istio/istio/issues/25945) introducing istioctl wait in favor of a 10s sleep lead to flakes
-			// to work around this, we will temporarily make sure we are always sleeping at least 10s, even if istioctl wait is faster.
-			// This allows us to debug istioctl wait, while still ensuring tests are stable
-			sleep := time.Second*10 - time.Since(t0)
-			ctx.Logf("[%s] [%v] Wait for additional %v config propagate to endpoints...", testName, time.Now(), sleep)
-			time.Sleep(sleep)
-			ctx.Logf("[%s] [%v] Finish waiting. Continue testing.", testName, time.Now())
-			ctx.Cleanup(func() {
-				if err := retry.UntilSuccess(func() error {
-					return rc.ctx.Config().DeleteYAML(c.Namespace.Name(), policyYAML)
-				}); err != nil {
-					log.Errorf("failed to delete configuration: %v", err)
-				}
+			t.NewSubTest("wait for config").Run(func(t framework.TestContext) {
+				util.WaitForConfig(t, policyYAML, c.Namespace)
 			})
-
-			for _, src := range []echo.Instance{rc.A, rc.B, rc.Headless, rc.Naked, rc.HeadlessNaked} {
-				for _, dest := range []echo.Instance{rc.A, rc.B, rc.Headless, rc.Multiversion, rc.Naked, rc.VM, rc.HeadlessNaked} {
-					copts := &callOptions
-					// If test case specified service call options, use that instead.
-					if c.CallOpts != nil {
-						copts = &c.CallOpts
-					}
-					for _, opts := range *copts {
-						// Copy the loop variables so they won't change for the subtests.
-						src := src
-						dest := dest
-						opts := opts
-						onPreRun := c.OnRun
-
-						// Set the target on the call options.
-						opts.Target = dest
-
-						if c.Include(src, opts) {
-							expectSuccess := c.ExpectSuccess(src, opts)
-
-							subTestName := fmt.Sprintf("%s->%s://%s:%s%s",
-								src.Config().Service,
-								opts.Scheme,
-								dest.Config().Service,
-								opts.PortName,
-								opts.Path)
-
-							ctx.NewSubTest(subTestName).
-								RunParallel(func(ctx framework.TestContext) {
-									if onPreRun != nil {
-										onPreRun(ctx, src, opts)
-									}
-
-									checker := connection.Checker{
-										From:          src,
-										Options:       opts,
-										ExpectSuccess: expectSuccess,
-									}
-									checker.CheckOrFail(ctx)
-								})
+			for _, clients := range []echo.Instances{apps.A, apps.B.Match(echo.Namespace(apps.Namespace1.Name())), apps.Headless, apps.Naked, apps.HeadlessNaked} {
+				for _, client := range clients {
+					client := client
+					t.NewSubTest(fmt.Sprintf("%s in %s",
+						client.Config().Service, client.Config().Cluster.StableName())).Run(func(t framework.TestContext) {
+						destinationSets := []echo.Instances{
+							apps.A,
+							apps.B,
+							// only hit same network headless services
+							apps.Headless.Match(echo.InNetwork(client.Config().Cluster.NetworkName())),
+							// only hit same cluster multiversion services
+							apps.Multiversion.Match(echo.InCluster(client.Config().Cluster)),
+							// only hit same cluster naked services
+							apps.Naked.Match(echo.InCluster(client.Config().Cluster)),
+							apps.VM,
+							// only hit same network headless services
+							apps.Headless.Match(echo.InNetwork(client.Config().Cluster.NetworkName())),
 						}
-					}
+
+						for _, destinations := range destinationSets {
+							destinations := destinations
+							if c.ExpectDestinations != nil {
+								destinations = c.ExpectDestinations(client, destinations)
+							}
+							destClusters := destinations.Clusters()
+							if len(destClusters) == 0 {
+								continue
+							}
+							// grabbing the 0th assumes all echos in destinations have the same service name
+							destination := destinations[0]
+							// TODO: fix Multiversion related test in multicluster
+							if t.Clusters().IsMulticluster() && apps.Multiversion.Contains(destination) {
+								continue
+							}
+							if (apps.IsNaked(client)) && len(destClusters) > 1 {
+								// TODO use echotest to generate the cases that would work for multi-network + naked
+								t.SkipNow()
+								continue
+							}
+							if isNakedToVM(apps, client, destination) {
+								// No need to waste time on these tests which will time out on connection instead of fail-fast
+								continue
+							}
+							callCount := 1
+							if len(destClusters) > 1 {
+								// so we can validate all clusters are hit
+								callCount = util.CallsPerCluster * len(destClusters)
+							}
+
+							copts := &callOptions
+							// If test case specified service call options, use that instead.
+							if c.CallOpts != nil {
+								copts = &c.CallOpts
+							}
+							for _, opts := range *copts {
+								// Copy the loop variables so they won't change for the subtests.
+								src := client
+								dest := destination
+								opts := opts
+								onPreRun := c.OnRun
+
+								// Set the target on the call options.
+								opts.Target = dest
+								opts.Count = callCount
+
+								include := c.Include
+								if include == nil {
+									include = func(_ echo.Instance, _ echo.CallOptions) bool { return true }
+								}
+								if include(src, opts) {
+									expectSuccess := c.ExpectSuccess(src, opts)
+									expectMTLS := c.ExpectMTLS(src, opts)
+									tpe := "positive"
+									if !expectSuccess {
+										tpe = "negative"
+									}
+									subTestName := fmt.Sprintf("%s to %s:%s%s %s",
+										opts.Scheme,
+										dest.Config().Service,
+										opts.PortName,
+										opts.Path,
+										tpe)
+
+									t.NewSubTest(subTestName).
+										RunParallel(func(t framework.TestContext) {
+											if onPreRun != nil {
+												onPreRun(t, src, opts)
+											}
+
+											checker := connection.Checker{
+												From:          src,
+												DestClusters:  destClusters,
+												Options:       opts,
+												ExpectSuccess: expectSuccess,
+												ExpectMTLS:    expectMTLS,
+											}
+											checker.CheckOrFail(t)
+										})
+								}
+							}
+						}
+					})
 				}
 			}
 		})
 	}
 }
 
-func (rc *Context) IsNaked(i echo.Instance) bool {
-	return i == rc.HeadlessNaked || i == rc.Naked
-}
-
-func (rc *Context) IsHeadless(i echo.Instance) bool {
-	return i == rc.HeadlessNaked || i == rc.Headless
+// Exclude calls from naked->VM since naked has no Envoy
+// However, no endpoint exists for VM in k8s, so calls from naked->VM will fail, regardless of mTLS
+func isNakedToVM(apps *util.EchoDeployments, src, dst echo.Instance) bool {
+	return apps.IsNaked(src) && apps.IsVM(dst)
 }

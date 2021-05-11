@@ -141,7 +141,7 @@ func TestCreateSelfSignedIstioCAWithoutSecret(t *testing.T) {
 		t.Errorf("Failed to get secret (error: %s)", err)
 	}
 
-	signingCertFromSecret, err := util.ParsePemEncodedCertificate(caSecret.Data[caCertID])
+	signingCertFromSecret, err := util.ParsePemEncodedCertificate(caSecret.Data[CaCertID])
 	if err != nil {
 		t.Errorf("Failed to parse cert (error: %s)", err)
 	}
@@ -338,27 +338,101 @@ func TestCreatePluggedCertCA(t *testing.T) {
 	}
 }
 
-// TODO: merge tests for SignCSR.
-func TestSignCSRForWorkload(t *testing.T) {
+func TestSignCSR(t *testing.T) {
 	subjectID := "spiffe://example.com/ns/foo/sa/bar"
 	cases := map[string]struct {
-		certOpts util.CertOptions
+		forCA         bool
+		certOpts      util.CertOptions
+		maxTTL        time.Duration
+		requestedTTL  time.Duration
+		verifyFields  util.VerifyFields
+		expectedError string
 	}{
 		"Workload uses RSA": {
+			forCA: false,
 			certOpts: util.CertOptions{
 				// This value is not used, instead, subjectID should be used in certificate.
 				Host:       "spiffe://different.com/test",
 				RSAKeySize: 2048,
 				IsCA:       false,
 			},
+			maxTTL:       time.Hour,
+			requestedTTL: 30 * time.Minute,
+			verifyFields: util.VerifyFields{
+				ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+				KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+				IsCA:        false,
+				Host:        subjectID,
+			},
+			expectedError: "",
 		},
 		"Workload uses EC": {
+			forCA: false,
 			certOpts: util.CertOptions{
 				// This value is not used, instead, subjectID should be used in certificate.
 				Host:     "spiffe://different.com/test",
 				ECSigAlg: util.EcdsaSigAlg,
 				IsCA:     false,
 			},
+			maxTTL:       time.Hour,
+			requestedTTL: 30 * time.Minute,
+			verifyFields: util.VerifyFields{
+				ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+				KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+				IsCA:        false,
+				Host:        subjectID,
+			},
+			expectedError: "",
+		},
+		"CA uses RSA": {
+			forCA: true,
+			certOpts: util.CertOptions{
+				RSAKeySize: 2048,
+				IsCA:       true,
+			},
+			maxTTL:       365 * 24 * time.Hour,
+			requestedTTL: 30 * 24 * time.Hour,
+			verifyFields: util.VerifyFields{
+				KeyUsage: x509.KeyUsageCertSign,
+				IsCA:     true,
+				Host:     subjectID,
+			},
+			expectedError: "",
+		},
+		"CA uses EC": {
+			forCA: true,
+			certOpts: util.CertOptions{
+				ECSigAlg: util.EcdsaSigAlg,
+				IsCA:     true,
+			},
+			maxTTL:       365 * 24 * time.Hour,
+			requestedTTL: 30 * 24 * time.Hour,
+			verifyFields: util.VerifyFields{
+				KeyUsage: x509.KeyUsageCertSign,
+				IsCA:     true,
+				Host:     subjectID,
+			},
+			expectedError: "",
+		},
+		"CSR uses RSA TTL error": {
+			forCA: false,
+			certOpts: util.CertOptions{
+				Org:        "istio.io",
+				RSAKeySize: 2048,
+			},
+			maxTTL:        2 * time.Hour,
+			requestedTTL:  3 * time.Hour,
+			expectedError: "requested TTL 3h0m0s is greater than the max allowed TTL 2h0m0s",
+		},
+		"CSR uses EC TTL error": {
+			forCA: false,
+			certOpts: util.CertOptions{
+				Org:      "istio.io",
+				ECSigAlg: util.EcdsaSigAlg,
+			},
+			maxTTL:        2 * time.Hour,
+			requestedTTL:  3 * time.Hour,
+			expectedError: "requested TTL 3h0m0s is greater than the max allowed TTL 2h0m0s",
 		},
 	}
 
@@ -368,26 +442,33 @@ func TestSignCSRForWorkload(t *testing.T) {
 			t.Errorf("%s: GenCSR error: %v", id, err)
 		}
 
-		ca, err := createCA(time.Hour, tc.certOpts.ECSigAlg)
+		ca, err := createCA(tc.maxTTL, tc.certOpts.ECSigAlg)
 		if err != nil {
 			t.Errorf("%s: createCA error: %v", id, err)
 		}
 
-		requestedTTL := 30 * time.Minute
-		certPEM, signErr := ca.Sign(csrPEM, []string{subjectID}, requestedTTL, false)
+		caCertOpts := CertOpts{
+			SubjectIDs: []string{subjectID},
+			TTL:        tc.requestedTTL,
+			ForCA:      tc.forCA,
+		}
+		certPEM, signErr := ca.Sign(csrPEM, caCertOpts)
 		if signErr != nil {
-			t.Errorf("%s: Sign error: %v", id, err)
+			if tc.expectedError == "" {
+				t.Errorf("%s: Sign error: %v", id, err)
+			}
+			if certPEM != nil {
+				t.Errorf("%s: Expected null cert be obtained a non-null cert.", id)
+			}
+			if signErr.(*caerror.Error).Error() != tc.expectedError {
+				t.Errorf("%s: Expected error: %s but got error: %s.", id, signErr.(*caerror.Error).Error(), tc.expectedError)
+			}
+			continue
 		}
 
-		fields := &util.VerifyFields{
-			ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
-			KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-			IsCA:        false,
-			Host:        subjectID,
-		}
 		_, _, certChainBytes, rootCertBytes := ca.GetCAKeyCertBundle().GetAll()
 		if err = util.VerifyCertificate(
-			keyPEM, append(certPEM, certChainBytes...), rootCertBytes, fields); err != nil {
+			keyPEM, append(certPEM, certChainBytes...), rootCertBytes, &tc.verifyFields); err != nil {
 			t.Errorf("%s: VerifyCertificate error: %v", id, err)
 		}
 
@@ -396,8 +477,8 @@ func TestSignCSRForWorkload(t *testing.T) {
 			t.Errorf("%s: ParsePemEncodedCertificate error: %v", id, err)
 		}
 
-		if ttl := cert.NotAfter.Sub(cert.NotBefore); ttl != requestedTTL {
-			t.Errorf("%s: Unexpected certificate TTL (expecting %v, actual %v)", id, requestedTTL, ttl)
+		if ttl := cert.NotAfter.Sub(cert.NotBefore) - util.ClockSkewGracePeriod; ttl != tc.requestedTTL {
+			t.Errorf("%s: Unexpected certificate TTL (expecting %v, actual %v)", id, tc.requestedTTL, ttl)
 		}
 		san := util.ExtractSANExtension(cert.Extensions)
 		if san == nil {
@@ -409,124 +490,6 @@ func TestSignCSRForWorkload(t *testing.T) {
 		}
 		if !reflect.DeepEqual(expected, san) {
 			t.Errorf("%s: Unexpected extensions: wanted %v but got %v", id, expected, san)
-		}
-	}
-}
-
-func TestSignCSRForCA(t *testing.T) {
-	subjectID := "spiffe://example.com/ns/foo/sa/baz"
-	cases := map[string]struct {
-		RSAKeySize int
-		IsCA       bool
-		ECSigAlg   util.SupportedECSignatureAlgorithms
-	}{
-		"CA uses RSA": {
-			RSAKeySize: 2048,
-			IsCA:       true,
-		},
-		"CA uses EC": {
-			ECSigAlg: util.EcdsaSigAlg,
-			IsCA:     true,
-		},
-	}
-
-	for id, tc := range cases {
-		certOpts := util.CertOptions{
-			RSAKeySize: tc.RSAKeySize,
-			IsCA:       tc.IsCA,
-			ECSigAlg:   tc.ECSigAlg,
-		}
-		csrPEM, keyPEM, err := util.GenCSR(certOpts)
-		if err != nil {
-			t.Errorf("%s: GenCSR error: %v", id, err)
-		}
-
-		ca, err := createCA(365*24*time.Hour, tc.ECSigAlg)
-		if err != nil {
-			t.Errorf("%s: createCA error: %v", id, err)
-		}
-
-		requestedTTL := 30 * 24 * time.Hour
-		certPEM, signErr := ca.Sign(csrPEM, []string{subjectID}, requestedTTL, true)
-		if signErr != nil {
-			t.Errorf("%s: Sign error: %v", id, err)
-		}
-
-		fields := &util.VerifyFields{
-			KeyUsage: x509.KeyUsageCertSign,
-			IsCA:     true,
-			Host:     subjectID,
-		}
-		_, _, certChainBytes, rootCertBytes := ca.GetCAKeyCertBundle().GetAll()
-		if err = util.VerifyCertificate(
-			keyPEM, append(certPEM, certChainBytes...), rootCertBytes, fields); err != nil {
-			t.Errorf("%s: VerifyCertificate error: %v", id, err)
-		}
-
-		cert, err := util.ParsePemEncodedCertificate(certPEM)
-		if err != nil {
-			t.Errorf("%s: ParsePemEncodedCertificate error: %v", id, err)
-		}
-
-		if ttl := cert.NotAfter.Sub(cert.NotBefore); ttl != requestedTTL {
-			t.Errorf("Unexpected certificate TTL (expecting %v, actual %v)", requestedTTL, ttl)
-		}
-		san := util.ExtractSANExtension(cert.Extensions)
-		if san == nil {
-			t.Errorf("%s: No SAN extension is found in the certificate", id)
-		}
-		expected, err := util.BuildSubjectAltNameExtension(subjectID)
-		if err != nil {
-			t.Error(err)
-		}
-		if !reflect.DeepEqual(expected, san) {
-			t.Errorf("%s: Unexpected extensions: wanted %v but got %v", id, expected, san)
-		}
-	}
-}
-
-func TestSignCSRTTLError(t *testing.T) {
-	subjectID := "spiffe://example.com/ns/foo/sa/bar"
-	cases := map[string]struct {
-		Org        string
-		RSAKeySize int
-		ECSigAlg   util.SupportedECSignatureAlgorithms
-	}{
-		"CSR uses RSA": {
-			Org:        "istio.io",
-			RSAKeySize: 2048,
-		},
-		"CSR uses EC": {
-			Org:      "istio.io",
-			ECSigAlg: util.EcdsaSigAlg,
-		},
-	}
-
-	for id, tc := range cases {
-		certOpts := util.CertOptions{
-			Org:        tc.Org,
-			RSAKeySize: tc.RSAKeySize,
-			ECSigAlg:   tc.ECSigAlg,
-		}
-		csrPEM, _, err := util.GenCSR(certOpts)
-		if err != nil {
-			t.Errorf("%s: GenCSR error: %v", id, err)
-		}
-
-		ca, err := createCA(2*time.Hour, tc.ECSigAlg)
-		if err != nil {
-			t.Errorf("%s: createCA error: %v", id, err)
-		}
-
-		ttl := 3 * time.Hour
-
-		cert, signErr := ca.Sign(csrPEM, []string{subjectID}, ttl, false)
-		if cert != nil {
-			t.Errorf("%s: Expected null cert be obtained a non-null cert.", id)
-		}
-		expectedErr := "requested TTL 3h0m0s is greater than the max allowed TTL 2h0m0s"
-		if signErr.(*caerror.Error).Error() != expectedErr {
-			t.Errorf("%s: Expected error: %s but got error: %s.", id, signErr.(*caerror.Error).Error(), expectedErr)
 		}
 	}
 }
@@ -594,7 +557,12 @@ func TestSignWithCertChain(t *testing.T) {
 		t.Error(err)
 	}
 
-	certPEM, signErr := ca.SignWithCertChain(csrPEM, []string{"localhost"}, time.Hour, false)
+	caCertOpts := CertOpts{
+		SubjectIDs: []string{"localhost"},
+		TTL:        time.Hour,
+		ForCA:      false,
+	}
+	certPEM, signErr := ca.SignWithCertChain(csrPEM, caCertOpts)
 	if signErr != nil {
 		t.Error(err)
 	}
@@ -611,26 +579,53 @@ func TestSignWithCertChain(t *testing.T) {
 
 func TestGenKeyCert(t *testing.T) {
 	cases := map[string]struct {
-		rootCertFile    string
-		certChainFile   string
-		signingCertFile string
-		signingKeyFile  string
+		rootCertFile      string
+		certChainFile     string
+		signingCertFile   string
+		signingKeyFile    string
+		certLifetime      time.Duration
+		checkCertLifetime bool
+		expectedError     string
 	}{
 		"RSA cryptography": {
-			rootCertFile:    "../testdata/multilevelpki/root-cert.pem",
-			certChainFile:   "../testdata/multilevelpki/int-cert-chain.pem",
-			signingCertFile: "../testdata/multilevelpki/int-cert.pem",
-			signingKeyFile:  "../testdata/multilevelpki/int-key.pem",
+			rootCertFile:      "../testdata/multilevelpki/root-cert.pem",
+			certChainFile:     "../testdata/multilevelpki/int-cert-chain.pem",
+			signingCertFile:   "../testdata/multilevelpki/int-cert.pem",
+			signingKeyFile:    "../testdata/multilevelpki/int-key.pem",
+			certLifetime:      3650 * 24 * time.Hour,
+			checkCertLifetime: false,
+			expectedError:     "",
 		},
 		"EC cryptography": {
-			rootCertFile:    "../testdata/multilevelpki/ecc-root-cert.pem",
-			certChainFile:   "../testdata/multilevelpki/ecc-int-cert-chain.pem",
-			signingCertFile: "../testdata/multilevelpki/ecc-int-cert.pem",
-			signingKeyFile:  "../testdata/multilevelpki/ecc-int-key.pem",
+			rootCertFile:      "../testdata/multilevelpki/ecc-root-cert.pem",
+			certChainFile:     "../testdata/multilevelpki/ecc-int-cert-chain.pem",
+			signingCertFile:   "../testdata/multilevelpki/ecc-int-cert.pem",
+			signingKeyFile:    "../testdata/multilevelpki/ecc-int-key.pem",
+			certLifetime:      3650 * 24 * time.Hour,
+			checkCertLifetime: false,
+			expectedError:     "",
+		},
+		"Pass lifetime check": {
+			rootCertFile:      "../testdata/multilevelpki/ecc-root-cert.pem",
+			certChainFile:     "../testdata/multilevelpki/ecc-int-cert-chain.pem",
+			signingCertFile:   "../testdata/multilevelpki/ecc-int-cert.pem",
+			signingKeyFile:    "../testdata/multilevelpki/ecc-int-key.pem",
+			certLifetime:      24 * time.Hour,
+			checkCertLifetime: true,
+			expectedError:     "",
+		},
+		"Error lifetime check": {
+			rootCertFile:      "../testdata/multilevelpki/ecc-root-cert.pem",
+			certChainFile:     "../testdata/multilevelpki/ecc-int-cert-chain.pem",
+			signingCertFile:   "../testdata/multilevelpki/ecc-int-cert.pem",
+			signingKeyFile:    "../testdata/multilevelpki/ecc-int-key.pem",
+			certLifetime:      25 * time.Hour,
+			checkCertLifetime: true,
+			expectedError:     "requested TTL 25h0m0s is greater than the max allowed TTL 24h0m0s",
 		},
 	}
 	defaultWorkloadCertTTL := 30 * time.Minute
-	maxWorkloadCertTTL := 3650 * 24 * time.Hour
+	maxWorkloadCertTTL := 24 * time.Hour
 	rsaKeySize := 2048
 
 	for id, tc := range cases {
@@ -642,24 +637,32 @@ func TestGenKeyCert(t *testing.T) {
 
 		ca, err := NewIstioCA(caopts)
 		if err != nil {
-			t.Errorf("%s: got error while creating plugged-cert CA: %v", id, err)
+			t.Fatalf("%s: got error while creating plugged-cert CA: %v", id, err)
 		}
 		if ca == nil {
 			t.Fatalf("failed to create a plugged-cert CA.")
 		}
 
-		certPEM, privPEM, err := ca.GenKeyCert([]string{"host1", "host2"}, 3650*24*time.Hour)
+		certPEM, privPEM, err := ca.GenKeyCert([]string{"host1", "host2"}, tc.certLifetime, tc.checkCertLifetime)
 		if err != nil {
-			t.Errorf("%s: GenKeyCert error: %v", id, err)
+			if tc.expectedError == "" {
+				t.Fatalf("[%s] Unexpected error: %v", id, err)
+			}
+			if err.Error() != tc.expectedError {
+				t.Fatalf("[%s] Error returned does not match expectation: %v VS (expected) %v", id, err, tc.expectedError)
+			}
+			continue
+		} else if tc.expectedError != "" {
+			t.Fatalf("[%s] GenKeyCert succeeded but expected error: %v", id, tc.expectedError)
 		}
 
 		cert, err := tls.X509KeyPair(certPEM, privPEM)
 		if err != nil {
-			t.Errorf("%s: X509KeyPair error: %v", id, err)
+			t.Fatalf("[%s] X509KeyPair error: %v", id, err)
 		}
 
 		if len(cert.Certificate) != 3 {
-			t.Errorf("%s: unexpected number of certificates returned: %d (expected 3)", id, len(cert.Certificate))
+			t.Fatalf("[%s] unexpected number of certificates returned: %d (expected 3)", id, len(cert.Certificate))
 		}
 	}
 }

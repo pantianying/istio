@@ -21,10 +21,6 @@ import (
 	"io/ioutil"
 	"time"
 
-	"github.com/golang/protobuf/ptypes"
-
-	"istio.io/pkg/log"
-
 	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	authapi "github.com/envoyproxy/go-control-plane/envoy/extensions/transport_sockets/tls/v3"
 	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
@@ -33,8 +29,9 @@ import (
 	"google.golang.org/grpc/metadata"
 
 	authn_model "istio.io/istio/pilot/pkg/security/model"
-	sdscache "istio.io/istio/security/pkg/nodeagent/cache"
-	agent_sds "istio.io/istio/security/pkg/nodeagent/sds"
+	v3 "istio.io/istio/pilot/pkg/xds/v3"
+	"istio.io/istio/pkg/security"
+	"istio.io/pkg/log"
 )
 
 // Client is a lightweight client for testing secret discovery service server.
@@ -136,9 +133,9 @@ func (c *Client) Send() error {
 			Id: "sidecar~127.0.0.1~id2~local",
 		},
 		ResourceNames: []string{
-			sdscache.WorkloadKeyCertResourceName,
+			security.WorkloadKeyCertResourceName,
 		},
-		TypeUrl: agent_sds.SecretTypeV3,
+		TypeUrl: v3.SecretType,
 	})
 }
 
@@ -152,7 +149,7 @@ func ValidateResponse(response *discovery.DiscoveryResponse) error {
 		return fmt.Errorf("unexpected resource size in the response, %v ", response.Resources)
 	}
 	var pb authapi.Secret
-	if err := ptypes.UnmarshalAny(response.Resources[0], &pb); err != nil {
+	if err := response.Resources[0].UnmarshalTo(&pb); err != nil {
 		return fmt.Errorf("unmarshalAny SDS response failed: %v", err)
 	}
 	return nil

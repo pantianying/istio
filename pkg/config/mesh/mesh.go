@@ -22,20 +22,15 @@ import (
 
 	"github.com/ghodss/yaml"
 	"github.com/gogo/protobuf/proto"
-
-	"istio.io/api/networking/v1alpha3"
-
 	"github.com/gogo/protobuf/types"
 	"github.com/hashicorp/go-multierror"
 
-	"istio.io/pkg/filewatcher"
-	"istio.io/pkg/log"
-
 	meshconfig "istio.io/api/mesh/v1alpha1"
-
+	"istio.io/api/networking/v1alpha3"
 	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/config/validation"
 	"istio.io/istio/pkg/util/gogoprotomarshal"
+	"istio.io/pkg/log"
 )
 
 // DefaultProxyConfig for individual proxies
@@ -43,7 +38,6 @@ func DefaultProxyConfig() meshconfig.ProxyConfig {
 	// TODO: include revision based on REVISION env
 	// TODO: set default namespace based on POD_NAMESPACE env
 	return meshconfig.ProxyConfig{
-		// missing: ConnectTimeout: 10 * time.Second,
 		ConfigPath:               constants.ConfigPathDir,
 		ServiceCluster:           constants.ServiceClusterName,
 		DrainDuration:            types.DurationProto(45 * time.Second),
@@ -62,13 +56,9 @@ func DefaultProxyConfig() meshconfig.ProxyConfig {
 		},
 
 		// Code defaults
-		BinaryPath:            constants.BinaryPathFilename,
-		StatsdUdpAddress:      "",
-		EnvoyMetricsService:   &meshconfig.RemoteService{Address: ""},
-		EnvoyAccessLogService: &meshconfig.RemoteService{Address: ""},
-		CustomConfigFile:      "",
-		StatNameLength:        189,
-		StatusPort:            15020,
+		BinaryPath:     constants.BinaryPathFilename,
+		StatNameLength: 189,
+		StatusPort:     15020,
 	}
 }
 
@@ -85,9 +75,7 @@ func DefaultMeshConfig() meshconfig.MeshConfig {
 		AccessLogEncoding:           meshconfig.MeshConfig_TEXT,
 		AccessLogFormat:             "",
 		EnableEnvoyAccessLogService: false,
-		ReportBatchMaxEntries:       100,
-		ReportBatchMaxTime:          types.DurationProto(1 * time.Second),
-		ProtocolDetectionTimeout:    types.DurationProto(5 * time.Second),
+		ProtocolDetectionTimeout:    types.DurationProto(0),
 		IngressService:              "istio-ingressgateway",
 		IngressControllerMode:       meshconfig.MeshConfig_STRICT,
 		IngressClass:                "istio",
@@ -180,6 +168,18 @@ func ApplyMeshConfigDefaults(yaml string) (*meshconfig.MeshConfig, error) {
 	return ApplyMeshConfig(yaml, DefaultMeshConfig())
 }
 
+func DeepCopyMeshConfig(mc *meshconfig.MeshConfig) (*meshconfig.MeshConfig, error) {
+	j, err := gogoprotomarshal.ToJSON(mc)
+	if err != nil {
+		return nil, err
+	}
+	nmc := &meshconfig.MeshConfig{}
+	if err := gogoprotomarshal.ApplyJSON(j, nmc); err != nil {
+		return nil, err
+	}
+	return nmc, nil
+}
+
 // EmptyMeshNetworks configuration with no networks
 func EmptyMeshNetworks() meshconfig.MeshNetworks {
 	return meshconfig.MeshNetworks{
@@ -219,6 +219,15 @@ func ReadMeshConfig(filename string) (*meshconfig.MeshConfig, error) {
 	return ApplyMeshConfigDefaults(string(yaml))
 }
 
+// ReadMeshConfigData gets mesh configuration yaml from a config file
+func ReadMeshConfigData(filename string) string {
+	yaml, err := ioutil.ReadFile(filename)
+	if err != nil {
+		return ""
+	}
+	return string(yaml)
+}
+
 // ResolveHostsInNetworksConfig will go through the Gateways addresses for all
 // networks in the config and if it's not an IP address it will try to lookup
 // that hostname and replace it with the IP address in the config
@@ -242,27 +251,4 @@ func ResolveHostsInNetworksConfig(config *meshconfig.MeshNetworks) {
 			}
 		}
 	}
-}
-
-// Add to the FileWatcher the provided file and execute the provided function
-// on any change event for this file.
-// Using a debouncing mechanism to avoid calling the callback multiple times
-// per event.
-func addFileWatcher(fileWatcher filewatcher.FileWatcher, file string, callback func()) {
-	_ = fileWatcher.Add(file)
-	go func() {
-		var timerC <-chan time.Time
-		for {
-			select {
-			case <-timerC:
-				timerC = nil
-				callback()
-			case <-fileWatcher.Events(file):
-				// Use a timer to debounce configuration updates
-				if timerC == nil {
-					timerC = time.After(100 * time.Millisecond)
-				}
-			}
-		}
-	}()
 }

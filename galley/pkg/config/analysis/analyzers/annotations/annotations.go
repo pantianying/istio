@@ -18,8 +18,8 @@ import (
 	"strings"
 
 	"istio.io/api/annotation"
-
 	"istio.io/istio/galley/pkg/config/analysis"
+	"istio.io/istio/galley/pkg/config/analysis/analyzers/util"
 	"istio.io/istio/galley/pkg/config/analysis/msg"
 	"istio.io/istio/pkg/config/resource"
 	"istio.io/istio/pkg/config/schema/collection"
@@ -30,9 +30,7 @@ import (
 // K8sAnalyzer checks for misplaced and invalid Istio annotations in K8s resources
 type K8sAnalyzer struct{}
 
-var (
-	istioAnnotations = annotation.AllResourceAnnotations()
-)
+var istioAnnotations = annotation.AllResourceAnnotations()
 
 // Metadata implements analyzer.Analyzer
 func (*K8sAnalyzer) Metadata() analysis.Metadata {
@@ -82,9 +80,18 @@ outer:
 
 		annotationDef := lookupAnnotation(ann)
 		if annotationDef == nil {
-			ctx.Report(collectionType,
-				msg.NewUnknownAnnotation(r, ann))
+			m := msg.NewUnknownAnnotation(r, ann)
+			util.AddLineNumber(r, ann, m)
+
+			ctx.Report(collectionType, m)
 			continue
+		}
+
+		if annotationDef.Deprecated {
+			m := msg.NewDeprecatedAnnotation(r, ann)
+			util.AddLineNumber(r, ann, m)
+
+			ctx.Report(collectionType, m)
 		}
 
 		// If the annotation def attaches to Any, exit early
@@ -96,18 +103,20 @@ outer:
 
 		attachesTo := resourceTypesAsStrings(annotationDef.Resources)
 		if !contains(attachesTo, kind) {
-			ctx.Report(collectionType,
-				msg.NewMisplacedAnnotation(r, ann, strings.Join(attachesTo, ", ")))
+			m := msg.NewMisplacedAnnotation(r, ann, strings.Join(attachesTo, ", "))
+			util.AddLineNumber(r, ann, m)
+
+			ctx.Report(collectionType, m)
 			continue
 		}
 
-		// TODO: Check annotation.Deprecated.  Not implemented because no
-		// deprecations in the table have yet been deprecated!
 		validationFunction := inject.AnnotationValidation[ann]
 		if validationFunction != nil {
 			if err := validationFunction(value); err != nil {
-				ctx.Report(collectionType,
-					msg.NewInvalidAnnotation(r, ann, err.Error()))
+				m := msg.NewInvalidAnnotation(r, ann, err.Error())
+				util.AddLineNumber(r, ann, m)
+
+				ctx.Report(collectionType, m)
 				continue
 			}
 		}

@@ -26,19 +26,26 @@ import (
 	. "github.com/onsi/gomega"
 
 	meshconfig "istio.io/api/mesh/v1alpha1"
-	"istio.io/pkg/filewatcher"
-
 	"istio.io/istio/pkg/config/mesh"
 	"istio.io/istio/pkg/util/protomarshal"
+	"istio.io/pkg/filewatcher"
 )
 
 func TestNewWatcherWithBadInputShouldFail(t *testing.T) {
 	g := NewWithT(t)
-	_, err := mesh.NewWatcher(filewatcher.NewWatcher(), "")
+	_, err := mesh.NewFileWatcher(filewatcher.NewWatcher(), "", false)
 	g.Expect(err).ToNot(BeNil())
 }
 
 func TestWatcherShouldNotifyHandlers(t *testing.T) {
+	watcherShouldNotifyHandlers(t, false)
+}
+
+func TestMultiWatcherShouldNotifyHandlers(t *testing.T) {
+	watcherShouldNotifyHandlers(t, true)
+}
+
+func watcherShouldNotifyHandlers(t *testing.T, multi bool) {
 	g := NewWithT(t)
 
 	path := newTempFile(t)
@@ -47,7 +54,7 @@ func TestWatcherShouldNotifyHandlers(t *testing.T) {
 	m := mesh.DefaultMeshConfig()
 	writeMessage(t, path, &m)
 
-	w := newWatcher(t, path)
+	w := newWatcher(t, path, multi)
 	g.Expect(w.Mesh()).To(Equal(&m))
 
 	doneCh := make(chan struct{}, 1)
@@ -72,9 +79,9 @@ func TestWatcherShouldNotifyHandlers(t *testing.T) {
 	}
 }
 
-func newWatcher(t testing.TB, filename string) mesh.Watcher {
+func newWatcher(t testing.TB, filename string, multi bool) mesh.Watcher {
 	t.Helper()
-	w, err := mesh.NewWatcher(filewatcher.NewWatcher(), filename)
+	w, err := mesh.NewFileWatcher(filewatcher.NewWatcher(), filename, multi)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +136,7 @@ func BenchmarkGetMesh(b *testing.B) {
 	m := mesh.DefaultMeshConfig()
 	writeMessage(b, path, &m)
 
-	w := newWatcher(b, path)
+	w := newWatcher(b, path, false)
 
 	b.StartTimer()
 

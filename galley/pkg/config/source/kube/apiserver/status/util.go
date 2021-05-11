@@ -27,12 +27,11 @@ func toStatusValue(msgs diag.Messages) interface{} {
 		return nil
 	}
 
-	result := make([]interface{}, 0)
+	result := make([]interface{}, 0, len(msgs))
 	for _, m := range msgs {
 		m.DocRef = DocRef
-		// For the purposes of status update, the origin field is redundant
-		// since we're attaching the message to the origin resource.
-		result = append(result, m.Unstructured(false))
+
+		result = append(result, m.UnstructuredAnalysisMessageBase())
 	}
 
 	return result

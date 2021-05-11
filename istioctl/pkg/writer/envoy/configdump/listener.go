@@ -27,7 +27,7 @@ import (
 	httpConn "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
 	tcp "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/tcp_proxy/v3"
 	"github.com/envoyproxy/go-control-plane/pkg/wellknown"
-	"github.com/golang/protobuf/ptypes"
+	"sigs.k8s.io/yaml"
 
 	protio "istio.io/istio/istioctl/pkg/util/proto"
 	"istio.io/istio/pilot/pkg/networking/util"
@@ -67,11 +67,19 @@ func (l *ListenerFilter) Verify(listener *listener.Listener) bool {
 	return true
 }
 
+func getFilterChains(l *listener.Listener) []*listener.FilterChain {
+	res := l.FilterChains
+	if l.DefaultFilterChain != nil {
+		res = append(res, l.DefaultFilterChain)
+	}
+	return res
+}
+
 // retrieveListenerType classifies a Listener as HTTP|TCP|HTTP+TCP|UNKNOWN
 func retrieveListenerType(l *listener.Listener) string {
 	nHTTP := 0
 	nTCP := 0
-	for _, filterChain := range l.GetFilterChains() {
+	for _, filterChain := range getFilterChains(l) {
 		for _, filter := range filterChain.GetFilters() {
 			if filter.Name == HTTPListener {
 				nHTTP++
@@ -110,7 +118,7 @@ func (c *ConfigWriter) PrintListenerSummary(filter ListenerFilter) error {
 		return err
 	}
 
-	verifiedListeners := []*listener.Listener{}
+	verifiedListeners := make([]*listener.Listener, 0, len(listeners))
 	for _, l := range listeners {
 		if filter.Verify(l) {
 			verifiedListeners = append(verifiedListeners, l)
@@ -179,8 +187,9 @@ var (
 )
 
 func retrieveListenerMatches(l *listener.Listener) []filterchain {
-	resp := []filterchain{}
-	for _, filterChain := range l.GetFilterChains() {
+	fChains := getFilterChains(l)
+	resp := make([]filterchain, 0, len(fChains))
+	for _, filterChain := range fChains {
 		match := filterChain.FilterChainMatch
 		if match == nil {
 			match = &listener.FilterChainMatch{}
@@ -213,15 +222,14 @@ func retrieveListenerMatches(l *listener.Listener) []filterchain {
 		if match.DestinationPort != nil {
 			port = fmt.Sprintf(":%d", match.DestinationPort.GetValue())
 		}
-		if match.AddressSuffix != "" {
-			descrs = append(descrs, fmt.Sprintf("Addr: %s%s", match.AddressSuffix, port))
-		}
 		if len(match.PrefixRanges) > 0 {
 			pf := []string{}
 			for _, p := range match.PrefixRanges {
 				pf = append(pf, fmt.Sprintf("%s/%d", p.AddressPrefix, p.GetPrefixLen().GetValue()))
 			}
 			descrs = append(descrs, fmt.Sprintf("Addr: %s%s", strings.Join(pf, ","), port))
+		} else if port != "" {
+			descrs = append(descrs, fmt.Sprintf("Addr: *%s", port))
 		}
 		if len(descrs) == 0 {
 			descrs = []string{"ALL"}
@@ -238,11 +246,10 @@ func retrieveListenerMatches(l *listener.Listener) []filterchain {
 func getFilterType(filters []*listener.Filter) string {
 	for _, filter := range filters {
 		if filter.Name == HTTPListener {
-
 			httpProxy := &httpConn.HttpConnectionManager{}
 			// Allow Unmarshal to work even if Envoy and istioctl are different
 			filter.GetTypedConfig().TypeUrl = "type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager"
-			err := ptypes.UnmarshalAny(filter.GetTypedConfig(), httpProxy)
+			err := filter.GetTypedConfig().UnmarshalTo(httpProxy)
 			if err != nil {
 				return err.Error()
 			}
@@ -258,7 +265,7 @@ func getFilterType(filters []*listener.Filter) string {
 				tcpProxy := &tcp.TcpProxy{}
 				// Allow Unmarshal to work even if Envoy and istioctl are different
 				filter.GetTypedConfig().TypeUrl = "type.googleapis.com/envoy.extensions.filters.network.tcp_proxy.v3.TcpProxy"
-				err := ptypes.UnmarshalAny(filter.GetTypedConfig(), tcpProxy)
+				err := filter.GetTypedConfig().UnmarshalTo(tcpProxy)
 				if err != nil {
 					return err.Error()
 				}
@@ -273,6 +280,9 @@ func getFilterType(filters []*listener.Filter) string {
 }
 
 func describeRouteConfig(route *route.RouteConfiguration) string {
+	if cluster := getMatchAllCluster(route); cluster != "" {
+		return cluster
+	}
 	vhosts := []string{}
 	for _, vh := range route.GetVirtualHosts() {
 		if describeDomains(vh) == "" {
@@ -284,6 +294,36 @@ func describeRouteConfig(route *route.RouteConfiguration) string {
 	return fmt.Sprintf("Inline Route: %s", strings.Join(vhosts, "; "))
 }
 
+// If this is a route that matches everything and forwards to a cluster, just report the cluster.
+func getMatchAllCluster(er *route.RouteConfiguration) string {
+	if len(er.GetVirtualHosts()) != 1 {
+		return ""
+	}
+	vh := er.GetVirtualHosts()[0]
+	if !reflect.DeepEqual(vh.Domains, []string{"*"}) {
+		return ""
+	}
+	if len(vh.GetRoutes()) != 1 {
+		return ""
+	}
+	r := vh.GetRoutes()[0]
+	if r.GetMatch().GetPrefix() != "/" {
+		return ""
+	}
+	a, ok := r.GetAction().(*route.Route_Route)
+	if !ok {
+		return ""
+	}
+	cl, ok := a.Route.ClusterSpecifier.(*route.RouteAction_Cluster)
+	if !ok {
+		return ""
+	}
+	if strings.Contains(cl.Cluster, "Cluster") {
+		return cl.Cluster
+	}
+	return fmt.Sprintf("Cluster: %s", cl.Cluster)
+}
+
 func describeDomains(vh *route.VirtualHost) string {
 	if len(vh.GetDomains()) == 1 && vh.GetDomains()[0] == "*" {
 		return ""
@@ -292,7 +332,7 @@ func describeDomains(vh *route.VirtualHost) string {
 }
 
 func describeRoutes(vh *route.VirtualHost) string {
-	routes := []string{}
+	routes := make([]string, 0, len(vh.GetRoutes()))
 	for _, route := range vh.GetRoutes() {
 		routes = append(routes, describeMatch(route.GetMatch()))
 	}
@@ -315,7 +355,7 @@ func describeMatch(match *route.RouteMatch) string {
 }
 
 // PrintListenerDump prints the relevant listeners in the config dump to the ConfigWriter stdout
-func (c *ConfigWriter) PrintListenerDump(filter ListenerFilter) error {
+func (c *ConfigWriter) PrintListenerDump(filter ListenerFilter, outputFormat string) error {
 	_, listeners, err := c.setupListenerConfigWriter()
 	if err != nil {
 		return err
@@ -329,6 +369,11 @@ func (c *ConfigWriter) PrintListenerDump(filter ListenerFilter) error {
 	out, err := json.MarshalIndent(filteredListeners, "", "    ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal listeners: %v", err)
+	}
+	if outputFormat == "yaml" {
+		if out, err = yaml.JSONToYAML(out); err != nil {
+			return err
+		}
 	}
 	fmt.Fprintln(c.Stdout, string(out))
 	return nil
@@ -357,7 +402,7 @@ func (c *ConfigWriter) retrieveSortedListenerSlice() ([]*listener.Listener, erro
 			listenerTyped := &listener.Listener{}
 			// Support v2 or v3 in config dump. See ads.go:RequestedTypes for more info.
 			l.ActiveState.Listener.TypeUrl = v3.ListenerType
-			err = ptypes.UnmarshalAny(l.ActiveState.Listener, listenerTyped)
+			err = l.ActiveState.Listener.UnmarshalTo(listenerTyped)
 			if err != nil {
 				return nil, fmt.Errorf("unmarshal listener: %v", err)
 			}
@@ -370,7 +415,7 @@ func (c *ConfigWriter) retrieveSortedListenerSlice() ([]*listener.Listener, erro
 			listenerTyped := &listener.Listener{}
 			// Support v2 or v3 in config dump. See ads.go:RequestedTypes for more info.
 			l.Listener.TypeUrl = v3.ListenerType
-			err = ptypes.UnmarshalAny(l.Listener, listenerTyped)
+			err = l.Listener.UnmarshalTo(listenerTyped)
 			if err != nil {
 				return nil, fmt.Errorf("unmarshal listener: %v", err)
 			}

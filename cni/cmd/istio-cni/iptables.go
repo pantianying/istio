@@ -19,18 +19,14 @@ package main
 import (
 	"fmt"
 	"os/exec"
-
-	"go.uber.org/zap"
+	"strings"
 
 	"istio.io/pkg/log"
 )
 
-var (
-	nsSetupProg = "istio-iptables"
-)
+var nsSetupProg = "istio-iptables"
 
-type iptables struct {
-}
+type iptables struct{}
 
 func newIPTables() InterceptRuleMgr {
 	return &iptables{}
@@ -43,6 +39,7 @@ func (ipt *iptables) Program(netns string, rdrct *Redirect) error {
 	nsSetupExecutable := fmt.Sprintf("%s/%s", nsSetupBinDir, nsSetupProg)
 	nsenterArgs := []string{
 		netnsArg,
+		"--", // separate nsenter args from the rest with `--`, needed for hosts using BusyBox binaries
 		nsSetupExecutable,
 		"-p", rdrct.targetPort,
 		"-u", rdrct.noRedirectUID,
@@ -54,13 +51,13 @@ func (ipt *iptables) Program(netns string, rdrct *Redirect) error {
 		"-x", rdrct.excludeIPCidrs,
 		"-k", rdrct.kubevirtInterfaces,
 	}
-	log.Info("nsenter args",
-		zap.Reflect("nsenterArgs", nsenterArgs))
+	if rdrct.dnsRedirect {
+		nsenterArgs = append(nsenterArgs, "--redirect-dns", "--capture-all-dns")
+	}
+	log.Infof("nsenter args: %s", strings.Join(nsenterArgs, " "))
 	out, err := exec.Command("nsenter", nsenterArgs...).CombinedOutput()
 	if err != nil {
-		log.Error("nsenter failed",
-			zap.String("out", string(out)),
-			zap.Error(err))
+		log.WithLabels("err", err, "out", out).Errorf("nsenter failed ")
 		log.Infof("nsenter out: %s", out)
 	} else {
 		log.Infof("nsenter done: %s", out)

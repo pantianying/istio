@@ -17,25 +17,34 @@ package xds
 import (
 	"bytes"
 	"fmt"
+	"io/ioutil"
+	"os"
 	"path"
 	"testing"
 	"text/template"
 	"time"
 
-	"github.com/Masterminds/sprig"
-	endpoint "github.com/envoyproxy/go-control-plane/envoy/config/endpoint/v3"
+	"github.com/Masterminds/sprig/v3"
+	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
 	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	"github.com/golang/protobuf/jsonpb"
-	"github.com/golang/protobuf/proto"
-
-	"istio.io/pkg/env"
+	"github.com/golang/protobuf/ptypes/any"
+	"k8s.io/client-go/kubernetes/fake"
 
 	networking "istio.io/api/networking/v1alpha3"
-	"istio.io/pkg/log"
-
 	"istio.io/istio/pilot/pkg/config/kube/crd"
 	"istio.io/istio/pilot/pkg/model"
+	"istio.io/istio/pilot/pkg/networking/util"
+	kubesecrets "istio.io/istio/pilot/pkg/secrets/kube"
+	v3 "istio.io/istio/pilot/pkg/xds/v3"
+	"istio.io/istio/pilot/test/xdstest"
+	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/schema/collections"
+	"istio.io/istio/pkg/config/schema/gvk"
+	"istio.io/istio/pkg/spiffe"
+	"istio.io/istio/pkg/test/util/yml"
+	"istio.io/pkg/env"
+	istiolog "istio.io/pkg/log"
 )
 
 // ConfigInput defines inputs passed to the test config templates
@@ -67,8 +76,9 @@ var testCases = []ConfigInput{
 		ProxyType: model.Router,
 	},
 	{
-		Name:     "empty",
-		Services: 100,
+		Name:      "empty",
+		Services:  100,
+		ProxyType: model.SidecarProxy,
 	},
 	{
 		Name:     "tls",
@@ -82,11 +92,22 @@ var testCases = []ConfigInput{
 		Name:     "virtualservice",
 		Services: 100,
 	},
+	{
+		Name:     "authorizationpolicy",
+		Services: 100,
+	},
+	{
+		Name:     "peerauthentication",
+		Services: 100,
+	},
 }
 
 func disableLogging() {
-	for _, s := range log.Scopes() {
-		s.SetOutputLevel(log.NoneLevel)
+	for _, s := range istiolog.Scopes() {
+		if s.Name() == benchmarkScope.Name() {
+			continue
+		}
+		s.SetOutputLevel(istiolog.NoneLevel)
 	}
 }
 
@@ -97,7 +118,7 @@ func BenchmarkInitPushContext(b *testing.B) {
 			s, proxy := setupTest(b, tt)
 			b.ResetTimer()
 			for n := 0; n < b.N; n++ {
-				initPushContext(s.Env, proxy)
+				initPushContext(s.Env(), proxy)
 			}
 		})
 	}
@@ -105,28 +126,48 @@ func BenchmarkInitPushContext(b *testing.B) {
 
 func BenchmarkRouteGeneration(b *testing.B) {
 	disableLogging()
-
 	for _, tt := range testCases {
 		b.Run(tt.Name, func(b *testing.B) {
 			s, proxy := setupAndInitializeTest(b, tt)
 			// To determine which routes to generate, first gen listeners once (not part of benchmark) and extract routes
-			l := s.Discovery.ConfigGenerator.BuildListeners(proxy, s.PushContext)
-			routeNames := ExtractRoutesFromListeners(l)
+			l := s.Discovery.ConfigGenerator.BuildListeners(proxy, s.PushContext())
+			routeNames := xdstest.ExtractRoutesFromListeners(l)
 			if len(routeNames) == 0 {
 				b.Fatal("Got no route names!")
 			}
 			b.ResetTimer()
-			var response *discovery.DiscoveryResponse
+			var c model.Resources
 			for n := 0; n < b.N; n++ {
-				r := s.Discovery.ConfigGenerator.BuildHTTPRoutes(proxy, s.PushContext, routeNames)
-				if len(r) == 0 {
+				c, _ = s.Discovery.Generators[v3.RouteType].Generate(proxy, s.PushContext(), &model.WatchedResource{ResourceNames: routeNames}, nil)
+				if len(c) == 0 {
 					b.Fatal("Got no routes!")
 				}
-				response = routeDiscoveryResponse(r, "", "")
 			}
-			logDebug(b, response)
+			logDebug(b, c)
 		})
 	}
+}
+
+// Do a quick sanity tests to make sure telemetry v2 filters are applying. This ensures as they
+// update our benchmark doesn't become useless.
+func TestValidateTelemetry(t *testing.T) {
+	s, proxy := setupAndInitializeTest(t, ConfigInput{Name: "telemetry", Services: 1})
+	c, _ := s.Discovery.Generators[v3.ClusterType].Generate(proxy, s.PushContext(), nil, nil)
+	if len(c) == 0 {
+		t.Fatal("Got no clusters!")
+	}
+	for _, r := range c {
+		cls := &cluster.Cluster{}
+		if err := r.GetResource().UnmarshalTo(cls); err != nil {
+			t.Fatal(err)
+		}
+		for _, ff := range cls.Filters {
+			if ff.Name == "istio.metadata_exchange" {
+				return
+			}
+		}
+	}
+	t.Fatalf("telemetry v2 filters not found")
 }
 
 func BenchmarkClusterGeneration(b *testing.B) {
@@ -135,15 +176,14 @@ func BenchmarkClusterGeneration(b *testing.B) {
 		b.Run(tt.Name, func(b *testing.B) {
 			s, proxy := setupAndInitializeTest(b, tt)
 			b.ResetTimer()
-			var response *discovery.DiscoveryResponse
+			var c model.Resources
 			for n := 0; n < b.N; n++ {
-				c := s.Discovery.ConfigGenerator.BuildClusters(proxy, s.PushContext)
+				c, _ = s.Discovery.Generators[v3.ClusterType].Generate(proxy, s.PushContext(), nil, nil)
 				if len(c) == 0 {
 					b.Fatal("Got no clusters!")
 				}
-				response = cdsDiscoveryResponse(c, "")
 			}
-			logDebug(b, response)
+			logDebug(b, c)
 		})
 	}
 }
@@ -154,15 +194,75 @@ func BenchmarkListenerGeneration(b *testing.B) {
 		b.Run(tt.Name, func(b *testing.B) {
 			s, proxy := setupAndInitializeTest(b, tt)
 			b.ResetTimer()
-			var response *discovery.DiscoveryResponse
+			var c model.Resources
 			for n := 0; n < b.N; n++ {
-				l := s.Discovery.ConfigGenerator.BuildListeners(proxy, s.PushContext)
-				if len(l) == 0 {
+				c, _ = s.Discovery.Generators[v3.ListenerType].Generate(proxy, s.PushContext(), nil, nil)
+				if len(c) == 0 {
 					b.Fatal("Got no listeners!")
 				}
-				response = ldsDiscoveryResponse(l, "", "")
 			}
-			logDebug(b, response)
+			logDebug(b, c)
+		})
+	}
+}
+
+func BenchmarkNameTableGeneration(b *testing.B) {
+	disableLogging()
+	for _, tt := range testCases {
+		b.Run(tt.Name, func(b *testing.B) {
+			s, proxy := setupAndInitializeTest(b, tt)
+			b.ResetTimer()
+			var c model.Resources
+			for n := 0; n < b.N; n++ {
+				c, _ = s.Discovery.Generators[v3.NameTableType].Generate(proxy, s.PushContext(), nil, nil)
+				if len(c) == 0 && tt.ProxyType != model.Router {
+					b.Fatal("Got no name tables!")
+				}
+			}
+			logDebug(b, c)
+		})
+	}
+}
+
+func BenchmarkSecretGeneration(b *testing.B) {
+	disableLogging()
+	cases := []ConfigInput{
+		{
+			Name:     "secrets",
+			Services: 10,
+		},
+		{
+			Name:     "secrets",
+			Services: 1000,
+		},
+	}
+	for _, tt := range cases {
+		b.Run(fmt.Sprintf("%s-%d", tt.Name, tt.Services), func(b *testing.B) {
+			tmpl := template.Must(template.New("").Funcs(sprig.TxtFuncMap()).ParseFiles(path.Join("testdata", "benchmarks", tt.Name+".yaml")))
+			var buf bytes.Buffer
+			if err := tmpl.ExecuteTemplate(&buf, tt.Name+".yaml", tt); err != nil {
+				b.Fatalf("failed to execute template: %v", err)
+			}
+			s := NewFakeDiscoveryServer(b, FakeOptions{
+				KubernetesObjectString: buf.String(),
+			})
+			kubesecrets.DisableAuthorizationForTest(s.KubeClient().Kube().(*fake.Clientset))
+			watchedResources := []string{}
+			for i := 0; i < tt.Services; i++ {
+				watchedResources = append(watchedResources, fmt.Sprintf("kubernetes://istio-system/sds-credential-%d", i))
+			}
+			proxy := s.SetupProxy(&model.Proxy{Type: model.Router, ConfigNamespace: "istio-system", VerifiedIdentity: &spiffe.Identity{}})
+			gen := s.Discovery.Generators[v3.SecretType]
+			res := &model.WatchedResource{ResourceNames: watchedResources}
+			b.ResetTimer()
+			var c model.Resources
+			for n := 0; n < b.N; n++ {
+				c, _ = gen.Generate(proxy, s.PushContext(), res, &model.PushRequest{Full: true})
+				if len(c) == 0 {
+					b.Fatal("Got no secrets!")
+				}
+			}
+			logDebug(b, c)
 		})
 	}
 }
@@ -198,14 +298,14 @@ func BenchmarkEndpointGeneration(b *testing.B) {
 			proxy.SetSidecarScope(push)
 			b.ResetTimer()
 			for n := 0; n < b.N; n++ {
-				loadAssignments := make([]*endpoint.ClusterLoadAssignment, 0)
+				loadAssignments := make([]*any.Any, 0)
 				for svc := 0; svc < tt.services; svc++ {
-					l := s.Discovery.generateEndpoints(createEndpointBuilder(fmt.Sprintf("outbound|80||foo-%d.com", svc), proxy, push))
-					loadAssignments = append(loadAssignments, l)
+					l := s.Discovery.generateEndpoints(NewEndpointBuilder(fmt.Sprintf("outbound|80||foo-%d.com", svc), proxy, push))
+					loadAssignments = append(loadAssignments, util.MessageToAny(l))
 				}
-				response = endpointDiscoveryResponse(loadAssignments, version, push.Version)
+				response = endpointDiscoveryResponse(loadAssignments, version, push.LedgerVersion)
 			}
-			logDebug(b, response)
+			logDebug(b, model.AnyToUnnamedResources(response.GetResources()))
 		})
 	}
 }
@@ -227,26 +327,26 @@ func setupTest(t testing.TB, config ConfigInput) (*FakeDiscoveryServer, *model.P
 			Labels: map[string]string{
 				"istio.io/benchmark": "true",
 			},
-			IstioVersion: "1.7.0",
-			SdsEnabled:   true,
+			IstioVersion: "1.11.0",
 		},
-		// TODO: if you update this, make sure telemetry.yaml is also updated
-		IstioVersion:    &model.IstioVersion{Major: 1, Minor: 6},
 		ConfigNamespace: "default",
 	}
+	proxy.IstioVersion = model.ParseIstioVersion(proxy.Metadata.IstioVersion)
 
 	configs := getConfigsWithCache(t, config)
 	s := NewFakeDiscoveryServer(t, FakeOptions{
 		Configs: configs,
+		// Allow debounce to avoid overwhelming with writes
+		DebounceTime: time.Millisecond * 10,
 	})
 
 	return s, proxy
 }
 
-var configCache = map[ConfigInput][]model.Config{}
+var configCache = map[ConfigInput][]config.Config{}
 
-func getConfigsWithCache(t testing.TB, input ConfigInput) []model.Config {
-	// Config setup is slow for large tests. Cache this and return from cache.
+func getConfigsWithCache(t testing.TB, input ConfigInput) []config.Config {
+	// Config setup is slow for large tests. Cache this and return from Cache.
 	// This improves even running a single test, as go will run the full test (including setup) at least twice.
 	if cached, f := configCache[input]; f {
 		return cached
@@ -260,7 +360,18 @@ func getConfigsWithCache(t testing.TB, input ConfigInput) []model.Config {
 	if err := tmpl.ExecuteTemplate(&buf, configName+".yaml", input); err != nil {
 		t.Fatalf("failed to execute template: %v", err)
 	}
-	configs, badKinds, err := crd.ParseInputs(buf.String())
+	extra := path.Join("testdata", "benchmarks", configName+".extra.yaml")
+	inputYAML := buf.String()
+	if _, err := os.Stat(extra); err == nil {
+		bdata, err := ioutil.ReadFile(extra)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		inputYAML += "\n---\n" + yml.SplitYamlByKind(string(bdata))[gvk.EnvoyFilter.Kind]
+	}
+
+	configs, badKinds, err := crd.ParseInputs(inputYAML)
 	if err != nil {
 		t.Fatalf("failed to read config: %v", err)
 	}
@@ -280,7 +391,7 @@ func getConfigsWithCache(t testing.TB, input ConfigInput) []model.Config {
 
 func setupAndInitializeTest(t testing.TB, config ConfigInput) (*FakeDiscoveryServer, *model.Proxy) {
 	s, proxy := setupTest(t, config)
-	initPushContext(s.Env, proxy)
+	initPushContext(s.Env(), proxy)
 	return s, proxy
 }
 
@@ -293,37 +404,41 @@ func initPushContext(env *model.Environment, proxy *model.Proxy) {
 
 var debugGeneration = env.RegisterBoolVar("DEBUG_CONFIG_DUMP", false, "if enabled, print a full config dump of the generated config")
 
+var benchmarkScope = istiolog.RegisterScope("benchmark", "", 0)
+
 // Add additional debug info for a test
-func logDebug(b *testing.B, m *discovery.DiscoveryResponse) {
+func logDebug(b *testing.B, m model.Resources) {
 	b.Helper()
 	b.StopTimer()
 
 	if debugGeneration.Get() {
-		s, err := (&jsonpb.Marshaler{Indent: "  "}).MarshalToString(m)
-		if err != nil {
-			b.Fatal(err)
+		for i, r := range m {
+			s, err := (&jsonpb.Marshaler{Indent: "  "}).MarshalToString(r)
+			if err != nil {
+				b.Fatal(err)
+			}
+			// Cannot use b.Logf, it truncates
+			benchmarkScope.Infof("Generated: %d %s", i, s)
 		}
-		// Cannot use b.Logf, it truncates
-		log.Infof("Generated: %s", s)
 	}
-	bytes, err := proto.Marshal(m)
-	if err != nil {
-		b.Fatal(err)
+	bytes := 0
+	for _, r := range m {
+		bytes += len(r.GetResource().Value)
 	}
-	b.ReportMetric(float64(len(bytes))/1000, "kb/msg")
-	b.ReportMetric(float64(len(m.Resources)), "resources/msg")
+	b.ReportMetric(float64(bytes)/1000, "kb/msg")
+	b.ReportMetric(float64(len(m)), "resources/msg")
 	b.StartTimer()
 }
 
-func createEndpoints(numEndpoints int, numServices int) []model.Config {
-	result := make([]model.Config, 0, numServices)
+func createEndpoints(numEndpoints int, numServices int) []config.Config {
+	result := make([]config.Config, 0, numServices)
 	for s := 0; s < numServices; s++ {
 		endpoints := make([]*networking.WorkloadEntry, 0, numEndpoints)
 		for e := 0; e < numEndpoints; e++ {
 			endpoints = append(endpoints, &networking.WorkloadEntry{Address: fmt.Sprintf("111.%d.%d.%d", e/(256*256), (e/256)%256, e%256)})
 		}
-		result = append(result, model.Config{
-			ConfigMeta: model.ConfigMeta{
+		result = append(result, config.Config{
+			Meta: config.Meta{
 				GroupVersionKind:  collections.IstioNetworkingV1Alpha3Serviceentries.Resource().GroupVersionKind(),
 				Name:              fmt.Sprintf("foo-%d", s),
 				Namespace:         "default",

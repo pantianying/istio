@@ -15,19 +15,20 @@
 package option
 
 import (
-	"net"
+	"strings"
 
 	"github.com/gogo/protobuf/types"
 
 	meshAPI "istio.io/api/mesh/v1alpha1"
 	networkingAPI "istio.io/api/networking/v1alpha3"
-
 	"istio.io/istio/pilot/pkg/model"
 )
 
-type LocalhostValue string
-type WildcardValue string
-type DNSLookupFamilyValue string
+type (
+	LocalhostValue       string
+	WildcardValue        string
+	DNSLookupFamilyValue string
+)
 
 const (
 	LocalhostIPv4       LocalhostValue       = "127.0.0.1"
@@ -38,7 +39,7 @@ const (
 	DNSLookupFamilyIPv6 DNSLookupFamilyValue = "AUTO"
 )
 
-func ProxyConfig(value *meshAPI.ProxyConfig) Instance {
+func ProxyConfig(value *model.NodeMetaProxyConfig) Instance {
 	return newOption("config", value)
 }
 
@@ -56,6 +57,15 @@ func Cluster(value string) Instance {
 
 func NodeID(value string) Instance {
 	return newOption("nodeID", value)
+}
+
+func NodeType(value string) Instance {
+	ntype := strings.Split(value, "~")[0]
+	return newOption("nodeType", ntype)
+}
+
+func XdsType(value string) Instance {
+	return newOption("xds_type", value)
 }
 
 func Region(value string) Instance {
@@ -90,32 +100,8 @@ func DNSLookupFamily(value DNSLookupFamilyValue) Instance {
 	return newOption("dns_lookup_family", value)
 }
 
-func PodName(value string) Instance {
-	return newOptionOrSkipIfZero("PodName", value)
-}
-
-func PodNamespace(value string) Instance {
-	return newOptionOrSkipIfZero("PodNamespace", value)
-}
-
-func PodIP(value net.IP) Instance {
-	return newOption("PodIP", value).withConvert(podIPConverter(value))
-}
-
-func ControlPlaneAuth(value bool) Instance {
-	strVal := ""
-	if value {
-		strVal = "enable"
-	}
-	return newOptionOrSkipIfZero("ControlPlaneAuth", strVal)
-}
-
-func DisableReportCalls(value bool) Instance {
-	strVal := ""
-	if value {
-		strVal = "true"
-	}
-	return newOptionOrSkipIfZero("DisableReportCalls", strVal)
+func ProxyViaAgent(value bool) Instance {
+	return newOption("proxy_via_agent", value)
 }
 
 func OutlierLogPath(value string) Instance {
@@ -128,6 +114,15 @@ func LightstepAddress(value string) Instance {
 
 func LightstepToken(value string) Instance {
 	return newOption("lightstepToken", value)
+}
+
+func OpenCensusAgentAddress(value string) Instance {
+	return newOptionOrSkipIfZero("openCensusAgent", value)
+}
+
+func OpenCensusAgentContexts(value []meshAPI.Tracing_OpenCensusAgent_TraceContext) Instance {
+	return newOption("openCensusAgentContexts", value).
+		withConvert(openCensusAgentContextConverter(value))
 }
 
 func StackDriverEnabled(value bool) Instance {
@@ -215,10 +210,6 @@ func EnvoyStatsMatcherInclusionSuffix(value []string) Instance {
 
 func EnvoyStatsMatcherInclusionRegexp(value []string) Instance {
 	return newStringArrayOptionOrSkipIfEmpty("inclusionRegexps", value)
-}
-
-func PilotCertProvider(value string) Instance {
-	return newOption("pilot_cert_provider", value)
 }
 
 func STSPort(value int) Instance {

@@ -16,7 +16,6 @@ package framework
 
 import (
 	"errors"
-	"flag"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -31,13 +30,16 @@ import (
 
 	"gopkg.in/yaml.v2"
 
-	"istio.io/pkg/log"
-
+	kubelib "istio.io/istio/pkg/kube"
+	"istio.io/istio/pkg/test/framework/components/cluster"
 	"istio.io/istio/pkg/test/framework/components/environment/kube"
+	"istio.io/istio/pkg/test/framework/config"
 	ferrors "istio.io/istio/pkg/test/framework/errors"
 	"istio.io/istio/pkg/test/framework/label"
 	"istio.io/istio/pkg/test/framework/resource"
 	"istio.io/istio/pkg/test/scopes"
+	"istio.io/istio/pkg/test/util/file"
+	"istio.io/pkg/log"
 )
 
 // test.Run uses 0, 1, 2 exit codes. Use different exit codes for our framework.
@@ -66,7 +68,11 @@ var (
 		// These are also used for istio.io/istio, but make help to satisfy
 		// the feature label enforcement when running with BUILD_WITH_CONTAINER=1.
 		"^/work/tests/integration/",
-		"^/work/")
+		"^/work/",
+
+		// Outside of standard Istio  GOPATH
+		".*/istio/tests/integration/",
+	)
 )
 
 // getSettingsFunc is a function used to extract the default settings for the Suite.
@@ -91,8 +97,10 @@ type Suite interface {
 	RequireMaxClusters(maxClusters int) Suite
 	// RequireSingleCluster is a utility method that requires that there be exactly 1 cluster in the environment.
 	RequireSingleCluster() Suite
-	// RequireEnvironmentVersion validates the environment meets a minimum version
-	RequireEnvironmentVersion(version string) Suite
+	// RequireMinVersion validates the environment meets a minimum version
+	RequireMinVersion(minorVersion uint) Suite
+	// RequireMaxVersion validates the environment meets a maximum version
+	RequireMaxVersion(minorVersion uint) Suite
 	// Setup runs enqueues the given setup function to run before test execution.
 	Setup(fn resource.SetupFn) Suite
 	// Run the suite. This method calls os.Exit and does not return.
@@ -223,16 +231,36 @@ func (s *suiteImpl) RequireSingleCluster() Suite {
 	return s.RequireMinClusters(1).RequireMaxClusters(1)
 }
 
-func (s *suiteImpl) RequireEnvironmentVersion(version string) Suite {
+func (s *suiteImpl) RequireMinVersion(minorVersion uint) Suite {
 	fn := func(ctx resource.Context) error {
-		ver, err := ctx.Clusters()[0].GetKubernetesVersion()
-		if err != nil {
-			return fmt.Errorf("failed to get Kubernetes version: %v", err)
+		for _, c := range ctx.Clusters().Kube() {
+			ver, err := c.GetKubernetesVersion()
+			if err != nil {
+				return fmt.Errorf("failed to get Kubernetes version: %v", err)
+			}
+			if !kubelib.IsAtLeastVersion(c, minorVersion) {
+				s.Skip(fmt.Sprintf("Required Kubernetes version (1.%v) is greater than current: %v",
+					minorVersion, ver.String()))
+			}
 		}
-		serverVersion := fmt.Sprintf("%s.%s", ver.Major, ver.Minor)
-		if serverVersion < version {
-			s.Skip(fmt.Sprintf("Required Kubernetes version (%v) is greater than current: %v",
-				version, serverVersion))
+		return nil
+	}
+
+	s.requireFns = append(s.requireFns, fn)
+	return s
+}
+
+func (s *suiteImpl) RequireMaxVersion(minorVersion uint) Suite {
+	fn := func(ctx resource.Context) error {
+		for _, c := range ctx.Clusters().Kube() {
+			ver, err := c.GetKubernetesVersion()
+			if err != nil {
+				return fmt.Errorf("failed to get Kubernetes version: %v", err)
+			}
+			if !kubelib.IsLessThanVersion(c, minorVersion+1) {
+				s.Skip(fmt.Sprintf("Maximum Kubernetes version (1.%v) is less than current: %v",
+					minorVersion, ver.String()))
+			}
 		}
 		return nil
 	}
@@ -250,7 +278,7 @@ func (s *suiteImpl) runSetupFn(fn resource.SetupFn, ctx SuiteContext) (err error
 	defer func() {
 		// Dump if the setup function fails
 		if err != nil && ctx.Settings().CIMode {
-			rt.Dump()
+			rt.Dump(ctx)
 		}
 	}()
 	err = fn(ctx)
@@ -305,7 +333,7 @@ func (s *suiteImpl) run() (errLevel int) {
 
 	defer func() {
 		if errLevel != 0 && ctx.Settings().CIMode {
-			rt.Dump()
+			rt.Dump(ctx)
 		}
 
 		if err := rt.Close(); err != nil {
@@ -376,7 +404,7 @@ func isMulticluster(ctx resource.Context) bool {
 	return false
 }
 
-func clusters(ctx resource.Context) []resource.Cluster {
+func clusters(ctx resource.Context) []cluster.Cluster {
 	if ctx.Environment() != nil {
 		return ctx.Environment().Clusters()
 	}
@@ -385,7 +413,11 @@ func clusters(ctx resource.Context) []resource.Cluster {
 
 func (s *suiteImpl) writeOutput() {
 	// the ARTIFACTS env var is set by prow, and uploaded to GCS as part of the job artifact
-	artifactsPath := os.Getenv("ARTIFACTS")
+	artifactsPath, err := file.NormalizePath(os.Getenv("ARTIFACTS"))
+	if err != nil {
+		artifactsPath = os.Getenv("ARTIFACTS")
+		log.Warnf("failed normalizing %s: %v", artifactsPath, err)
+	}
 	if artifactsPath != "" {
 		ctx := rt.suiteContext()
 		ctx.outcomeMu.RLock()
@@ -400,7 +432,7 @@ func (s *suiteImpl) writeOutput() {
 		if err != nil {
 			log.Errorf("failed writing test suite outcome to yaml: %s", err)
 		}
-		err = ioutil.WriteFile(path.Join(artifactsPath, out.Name+".yaml"), outbytes, 0644)
+		err = ioutil.WriteFile(path.Join(artifactsPath, out.Name+".yaml"), outbytes, 0o644)
 		if err != nil {
 			log.Errorf("failed writing test suite outcome to file: %s", err)
 		}
@@ -476,16 +508,13 @@ func newEnvironment(ctx resource.Context) (resource.Environment, error) {
 	if err != nil {
 		return nil, err
 	}
-	if s.Minikube {
-		return nil, fmt.Errorf("istio.test.kube.minikube is deprecated; set --istio.test.kube.loadbalancer=false instead")
-	}
 	return kube.New(ctx, s)
 }
 
 func getSettings(testID string) (*resource.Settings, error) {
 	// Parse flags and init logging.
-	if !flag.Parsed() {
-		flag.Parse()
+	if !config.Parsed() {
+		config.Parse()
 	}
 
 	return resource.SettingsFromCommandLine(testID)

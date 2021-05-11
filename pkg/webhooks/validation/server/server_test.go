@@ -28,13 +28,14 @@ import (
 	"testing"
 	"time"
 
-	kubeApiAdmission "k8s.io/api/admission/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kubeApiAdmission "k8s.io/api/admission/v1beta1"
+	kubeApisMeta "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"istio.io/istio/pkg/config/schema/collections"
+	"istio.io/istio/pkg/kube"
 	"istio.io/istio/pkg/test/config"
 	"istio.io/istio/pkg/testcerts"
 )
@@ -52,7 +53,6 @@ func TestArgs_String(t *testing.T) {
 }
 
 func createTestWebhook(t testing.TB) (*Webhook, func()) {
-
 	t.Helper()
 	dir, err := ioutil.TempDir("", "galley_validation_webhook")
 	if err != nil {
@@ -152,66 +152,66 @@ func TestAdmitPilot(t *testing.T) {
 	cases := []struct {
 		name    string
 		admit   admitFunc
-		in      *kubeApiAdmission.AdmissionRequest
+		in      *kube.AdmissionRequest
 		allowed bool
 	}{
 		{
 			name:  "valid create",
-			admit: wh.admitPilot,
-			in: &kubeApiAdmission.AdmissionRequest{
-				Kind:      metav1.GroupVersionKind{Kind: collections.Mock.Resource().Kind()},
+			admit: wh.validate,
+			in: &kube.AdmissionRequest{
+				Kind:      kubeApisMeta.GroupVersionKind{Kind: collections.Mock.Resource().Kind()},
 				Object:    runtime.RawExtension{Raw: valid},
-				Operation: kubeApiAdmission.Create,
+				Operation: kube.Create,
 			},
 			allowed: true,
 		},
 		{
 			name:  "valid update",
-			admit: wh.admitPilot,
-			in: &kubeApiAdmission.AdmissionRequest{
-				Kind:      metav1.GroupVersionKind{Kind: collections.Mock.Resource().Kind()},
+			admit: wh.validate,
+			in: &kube.AdmissionRequest{
+				Kind:      kubeApisMeta.GroupVersionKind{Kind: collections.Mock.Resource().Kind()},
 				Object:    runtime.RawExtension{Raw: valid},
-				Operation: kubeApiAdmission.Update,
+				Operation: kube.Update,
 			},
 			allowed: true,
 		},
 		{
 			name:  "unsupported operation",
-			admit: wh.admitPilot,
-			in: &kubeApiAdmission.AdmissionRequest{
-				Kind:      metav1.GroupVersionKind{Kind: collections.Mock.Resource().Kind()},
+			admit: wh.validate,
+			in: &kube.AdmissionRequest{
+				Kind:      kubeApisMeta.GroupVersionKind{Kind: collections.Mock.Resource().Kind()},
 				Object:    runtime.RawExtension{Raw: valid},
-				Operation: kubeApiAdmission.Delete,
+				Operation: kube.Delete,
 			},
 			allowed: true,
 		},
 		{
 			name:  "invalid spec",
-			admit: wh.admitPilot,
-			in: &kubeApiAdmission.AdmissionRequest{
-				Kind:      metav1.GroupVersionKind{Kind: collections.Mock.Resource().Kind()},
+			admit: wh.validate,
+			in: &kube.AdmissionRequest{
+				Kind:      kubeApisMeta.GroupVersionKind{Kind: collections.Mock.Resource().Kind()},
 				Object:    runtime.RawExtension{Raw: invalidConfig},
-				Operation: kubeApiAdmission.Create,
+				Operation: kube.Create,
 			},
 			allowed: false,
 		},
 		{
 			name:  "corrupt object",
-			admit: wh.admitPilot,
-			in: &kubeApiAdmission.AdmissionRequest{
-				Kind:      metav1.GroupVersionKind{Kind: collections.Mock.Resource().Kind()},
+			admit: wh.validate,
+			in: &kube.AdmissionRequest{
+				Kind:      kubeApisMeta.GroupVersionKind{Kind: collections.Mock.Resource().Kind()},
 				Object:    runtime.RawExtension{Raw: append([]byte("---"), valid...)},
-				Operation: kubeApiAdmission.Create,
+				Operation: kube.Create,
 			},
 			allowed: false,
 		},
 		{
 			name:  "invalid extra key create",
-			admit: wh.admitPilot,
-			in: &kubeApiAdmission.AdmissionRequest{
-				Kind:      metav1.GroupVersionKind{Kind: collections.Mock.Resource().Kind()},
+			admit: wh.validate,
+			in: &kube.AdmissionRequest{
+				Kind:      kubeApisMeta.GroupVersionKind{Kind: collections.Mock.Resource().Kind()},
 				Object:    runtime.RawExtension{Raw: extraKeyConfig},
-				Operation: kubeApiAdmission.Create,
+				Operation: kube.Create,
 			},
 			allowed: false,
 		},
@@ -219,7 +219,7 @@ func TestAdmitPilot(t *testing.T) {
 
 	for i, c := range cases {
 		t.Run(fmt.Sprintf("[%d] %s", i, c.name), func(t *testing.T) {
-			got := wh.admitPilot(c.in)
+			got := wh.validate(c.in)
 			if got.Allowed != c.allowed {
 				t.Fatalf("got %v want %v", got.Allowed, c.allowed)
 			}
@@ -227,15 +227,19 @@ func TestAdmitPilot(t *testing.T) {
 	}
 }
 
-func makeTestReview(t *testing.T, valid bool) []byte {
+func makeTestReview(t *testing.T, valid bool, apiVersion string) []byte {
 	t.Helper()
 	review := kubeApiAdmission.AdmissionReview{
-		TypeMeta: metav1.TypeMeta{
-			APIVersion: "admission.k8s.io/v1",
+		TypeMeta: kubeApisMeta.TypeMeta{
 			Kind:       "AdmissionReview",
+			APIVersion: fmt.Sprintf("admission.k8s.io/%s", apiVersion),
 		},
 		Request: &kubeApiAdmission.AdmissionRequest{
-			Kind: metav1.GroupVersionKind{},
+			Kind: kubeApisMeta.GroupVersionKind{
+				Group:   kubeApiAdmission.GroupName,
+				Version: apiVersion,
+				Kind:    "AdmissionRequest",
+			},
 			Object: runtime.RawExtension{
 				Raw: makePilotConfig(t, 0, valid, false),
 			},
@@ -283,8 +287,9 @@ func TestServe(t *testing.T) {
 	}()
 	go wh.Run(stop)
 
-	validReview := makeTestReview(t, true)
-	invalidReview := makeTestReview(t, false)
+	validReview := makeTestReview(t, true, "v1beta1")
+	validReviewV1 := makeTestReview(t, true, "v1")
+	invalidReview := makeTestReview(t, false, "v1beta1")
 
 	cases := []struct {
 		name            string
@@ -297,6 +302,14 @@ func TestServe(t *testing.T) {
 		{
 			name:            "valid",
 			body:            validReview,
+			contentType:     "application/json",
+			wantAllowed:     true,
+			wantStatusCode:  http.StatusOK,
+			allowedResponse: true,
+		},
+		{
+			name:            "valid(v1 version)",
+			body:            validReviewV1,
 			contentType:     "application/json",
 			wantAllowed:     true,
 			wantStatusCode:  http.StatusOK,
@@ -338,8 +351,8 @@ func TestServe(t *testing.T) {
 			req.Header.Add("Content-Type", c.contentType)
 			w := httptest.NewRecorder()
 
-			serve(w, req, func(*kubeApiAdmission.AdmissionRequest) *kubeApiAdmission.AdmissionResponse {
-				return &kubeApiAdmission.AdmissionResponse{Allowed: c.allowedResponse}
+			serve(w, req, func(*kube.AdmissionRequest) *kube.AdmissionResponse {
+				return &kube.AdmissionResponse{Allowed: c.allowedResponse}
 			})
 
 			res := w.Result()

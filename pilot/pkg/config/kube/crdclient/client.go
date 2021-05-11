@@ -28,30 +28,36 @@ import (
 	"fmt"
 	"time"
 
-	apiextensionv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	jsonmerge "github.com/evanphx/json-patch/v5"
+	"github.com/hashicorp/go-multierror"
+	"gomodules.xyz/jsonpatch/v2"
+	crd "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	klabels "k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/json"
 	"k8s.io/client-go/informers"
-	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"  // import GKE cluster authentication plugin
-	_ "k8s.io/client-go/plugin/pkg/client/auth/oidc" // import OIDC cluster authentication plugin, e.g. for Tectonic
+
+	//  import GKE cluster authentication plugin
+	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
+
+	//  import OIDC cluster authentication plugin, e.g. for Tectonic
+	_ "k8s.io/client-go/plugin/pkg/client/auth/oidc"
 	"k8s.io/client-go/tools/cache"
-	serviceapisclient "sigs.k8s.io/service-apis/pkg/client/clientset/versioned"
+	gatewayapiclient "sigs.k8s.io/gateway-api/pkg/client/clientset/versioned"
 
 	"istio.io/api/label"
 	istioclient "istio.io/client-go/pkg/clientset/versioned"
-	"istio.io/pkg/ledger"
-	"istio.io/pkg/log"
-
 	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pilot/pkg/model"
-	controller2 "istio.io/istio/pilot/pkg/serviceregistry/kube/controller"
+	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/schema/collection"
 	"istio.io/istio/pkg/config/schema/collections"
-	"istio.io/istio/pkg/config/schema/resource"
 	"istio.io/istio/pkg/kube"
 	"istio.io/istio/pkg/queue"
+	"istio.io/pkg/log"
 )
 
 var scope = log.RegisterScope("kube", "Kubernetes client messages", 0)
@@ -66,21 +72,18 @@ type Client struct {
 	// domainSuffix for the config metadata
 	domainSuffix string
 
-	// Ledger for tracking config distribution
-	configLedger ledger.Ledger
-
 	// revision for this control plane instance. We will only read configs that match this revision.
 	revision string
 
 	// kinds keeps track of all cache handlers for known types
-	kinds map[resource.GroupVersionKind]*cacheHandler
+	kinds map[config.GroupVersionKind]*cacheHandler
 	queue queue.Instance
 
 	// The istio/client-go client we will use to access objects
 	istioClient istioclient.Interface
 
-	// The service-apis client we will use to access objects
-	serviceApisClient serviceapisclient.Interface
+	// The gateway-api client we will use to access objects
+	gatewayAPIClient gatewayapiclient.Interface
 }
 
 var _ model.ConfigStoreCache = &Client{}
@@ -97,7 +100,7 @@ func (cl *Client) checkReadyForEvents(curr interface{}) error {
 	return nil
 }
 
-func (cl *Client) RegisterEventHandler(kind resource.GroupVersionKind, handler func(model.Config, model.Config, model.Event)) {
+func (cl *Client) RegisterEventHandler(kind config.GroupVersionKind, handler func(config.Config, config.Config, model.Event)) {
 	h, exists := cl.kinds[kind]
 	if !exists {
 		return
@@ -106,12 +109,24 @@ func (cl *Client) RegisterEventHandler(kind resource.GroupVersionKind, handler f
 	h.handlers = append(h.handlers, handler)
 }
 
-// Start the queue and all informers. Callers should  wait for HasSynced() before depending on results.
+func (cl *Client) SetWatchErrorHandler(handler func(r *cache.Reflector, err error)) error {
+	var errs error
+	for _, h := range cl.kinds {
+		if err := h.informer.SetWatchErrorHandler(handler); err != nil {
+			errs = multierror.Append(errs, err)
+		}
+	}
+	return errs
+}
+
+// Run the queue and all informers. Callers should  wait for HasSynced() before depending on results.
 func (cl *Client) Run(stop <-chan struct{}) {
-	scope.Infoa("Starting Pilot K8S CRD controller")
+	t0 := time.Now()
+	scope.Info("Starting Pilot K8S CRD controller")
 
 	go func() {
 		cache.WaitForCacheSync(stop, cl.HasSynced)
+		scope.Info("Pilot K8S CRD controller synced ", time.Since(t0))
 		cl.queue.Run(stop)
 	}()
 
@@ -129,18 +144,28 @@ func (cl *Client) HasSynced() bool {
 	return true
 }
 
-func New(client kube.Client, configLedger ledger.Ledger, revision string, options controller2.Options) (model.ConfigStoreCache, error) {
-	out := &Client{
-		domainSuffix:      options.DomainSuffix,
-		configLedger:      configLedger,
-		schemas:           collections.PilotServiceApi,
-		revision:          revision,
-		queue:             queue.NewQueue(1 * time.Second),
-		kinds:             map[resource.GroupVersionKind]*cacheHandler{},
-		istioClient:       client.Istio(),
-		serviceApisClient: client.ServiceApis(),
+func New(client kube.Client, revision, domainSuffix string) (model.ConfigStoreCache, error) {
+	schemas := collections.Pilot
+	if features.EnableServiceApis {
+		schemas = collections.PilotServiceApi
 	}
-	known := knownCRDs(client.Ext())
+	return NewForSchemas(context.Background(), client, revision, domainSuffix, schemas)
+}
+
+func NewForSchemas(ctx context.Context, client kube.Client, revision, domainSuffix string, schemas collection.Schemas) (model.ConfigStoreCache, error) {
+	out := &Client{
+		domainSuffix:     domainSuffix,
+		schemas:          schemas,
+		revision:         revision,
+		queue:            queue.NewQueue(1 * time.Second),
+		kinds:            map[config.GroupVersionKind]*cacheHandler{},
+		istioClient:      client.Istio(),
+		gatewayAPIClient: client.GatewayAPI(),
+	}
+	known, err := knownCRDs(ctx, client.Ext())
+	if err != nil {
+		return nil, err
+	}
 	for _, s := range out.schemas.All() {
 		// From the spec: "Its name MUST be in the format <.spec.name>.<.spec.group>."
 		name := fmt.Sprintf("%s.%s", s.Resource().Plural(), s.Resource().Group())
@@ -148,7 +173,7 @@ func New(client kube.Client, configLedger ledger.Ledger, revision string, option
 			var i informers.GenericInformer
 			var err error
 			if s.Resource().Group() == "networking.x-k8s.io" {
-				i, err = client.ServiceApisInformer().ForResource(s.Resource().GroupVersionResource())
+				i, err = client.GatewayAPIInformer().ForResource(s.Resource().GroupVersionResource())
 			} else {
 				i, err = client.IstioInformer().ForResource(s.Resource().GroupVersionResource())
 			}
@@ -170,7 +195,7 @@ func (cl *Client) Schemas() collection.Schemas {
 }
 
 // Get implements store interface
-func (cl *Client) Get(typ resource.GroupVersionKind, name, namespace string) *model.Config {
+func (cl *Client) Get(typ config.GroupVersionKind, name, namespace string) *config.Config {
 	h, f := cl.kinds[typ]
 	if !f {
 		scope.Warnf("unknown type: %s", typ)
@@ -188,24 +213,16 @@ func (cl *Client) Get(typ resource.GroupVersionKind, name, namespace string) *mo
 	if !cl.objectInRevision(cfg) {
 		return nil
 	}
-	if features.EnableCRDValidation {
-		schema, _ := cl.Schemas().FindByGroupVersionKind(typ)
-		if err = schema.Resource().ValidateProto(cfg.Name, cfg.Namespace, cfg.Spec); err != nil {
-			handleValidationFailure(cfg, err)
-			return nil
-		}
-
-	}
 	return cfg
 }
 
 // Create implements store interface
-func (cl *Client) Create(config model.Config) (string, error) {
-	if config.Spec == nil {
-		return "", fmt.Errorf("nil spec for %v/%v", config.Name, config.Namespace)
+func (cl *Client) Create(cfg config.Config) (string, error) {
+	if cfg.Spec == nil {
+		return "", fmt.Errorf("nil spec for %v/%v", cfg.Name, cfg.Namespace)
 	}
 
-	meta, err := create(cl.istioClient, cl.serviceApisClient, config, getObjectMetadata(config))
+	meta, err := create(cl.istioClient, cl.gatewayAPIClient, cfg, getObjectMetadata(cfg))
 	if err != nil {
 		return "", err
 	}
@@ -213,12 +230,36 @@ func (cl *Client) Create(config model.Config) (string, error) {
 }
 
 // Update implements store interface
-func (cl *Client) Update(config model.Config) (string, error) {
-	if config.Spec == nil {
-		return "", fmt.Errorf("nil spec for %v/%v", config.Name, config.Namespace)
+func (cl *Client) Update(cfg config.Config) (string, error) {
+	if cfg.Spec == nil {
+		return "", fmt.Errorf("nil spec for %v/%v", cfg.Name, cfg.Namespace)
 	}
 
-	meta, err := update(cl.istioClient, cl.serviceApisClient, config, getObjectMetadata(config))
+	meta, err := update(cl.istioClient, cl.gatewayAPIClient, cfg, getObjectMetadata(cfg))
+	if err != nil {
+		return "", err
+	}
+	return meta.GetResourceVersion(), nil
+}
+
+func (cl *Client) UpdateStatus(cfg config.Config) (string, error) {
+	if cfg.Status == nil {
+		return "", fmt.Errorf("nil status for %v/%v on updateStatus()", cfg.Name, cfg.Namespace)
+	}
+
+	meta, err := updateStatus(cl.istioClient, cl.gatewayAPIClient, cfg, getObjectMetadata(cfg))
+	if err != nil {
+		return "", err
+	}
+	return meta.GetResourceVersion(), nil
+}
+
+// Patch applies only the modifications made in the PatchFunc rather than doing a full replace. Useful to avoid
+// read-modify-write conflicts when there are many concurrent-writers to the same resource.
+func (cl *Client) Patch(orig config.Config, patchFn config.PatchFunc) (string, error) {
+	modified, patchType := patchFn(orig.DeepCopy())
+
+	meta, err := patch(cl.istioClient, cl.gatewayAPIClient, orig, getObjectMetadata(orig), modified, getObjectMetadata(modified), patchType)
 	if err != nil {
 		return "", err
 	}
@@ -226,12 +267,13 @@ func (cl *Client) Update(config model.Config) (string, error) {
 }
 
 // Delete implements store interface
-func (cl *Client) Delete(typ resource.GroupVersionKind, name, namespace string) error {
-	return delete(cl.istioClient, cl.serviceApisClient, typ, name, namespace)
+// `resourceVersion` must be matched before deletion is carried out. If not possible, a 409 Conflict status will be
+func (cl *Client) Delete(typ config.GroupVersionKind, name, namespace string, resourceVersion *string) error {
+	return delete(cl.istioClient, cl.gatewayAPIClient, typ, name, namespace, resourceVersion)
 }
 
 // List implements store interface
-func (cl *Client) List(kind resource.GroupVersionKind, namespace string) ([]model.Config, error) {
+func (cl *Client) List(kind config.GroupVersionKind, namespace string) ([]config.Config, error) {
 	h, f := cl.kinds[kind]
 	if !f {
 		return nil, nil
@@ -241,20 +283,9 @@ func (cl *Client) List(kind resource.GroupVersionKind, namespace string) ([]mode
 	if err != nil {
 		return nil, err
 	}
-	out := make([]model.Config, 0, len(list))
+	out := make([]config.Config, 0, len(list))
 	for _, item := range list {
 		cfg := TranslateObject(item, kind, cl.domainSuffix)
-		if features.EnableCRDValidation {
-			schema, _ := cl.Schemas().FindByGroupVersionKind(kind)
-			if err = schema.Resource().ValidateProto(cfg.Name, cfg.Namespace, cfg.Spec); err != nil {
-				handleValidationFailure(cfg, err)
-				// DO NOT RETURN ERROR: if a single object is bad, it'll be ignored (with a log message), but
-				// the rest should still be processed.
-				continue
-			}
-
-		}
-
 		if cl.objectInRevision(cfg) {
 			out = append(out, *cfg)
 		}
@@ -263,8 +294,8 @@ func (cl *Client) List(kind resource.GroupVersionKind, namespace string) ([]mode
 	return out, err
 }
 
-func (cl *Client) objectInRevision(o *model.Config) bool {
-	configEnv, f := o.Labels[label.IstioRev]
+func (cl *Client) objectInRevision(o *config.Config) bool {
+	configEnv, f := o.Labels[label.IoIstioRev.Name]
 	if !f {
 		// This is a global object, and always included
 		return true
@@ -274,13 +305,16 @@ func (cl *Client) objectInRevision(o *model.Config) bool {
 }
 
 // knownCRDs returns all CRDs present in the cluster, with retries
-func knownCRDs(crdClient apiextensionsclient.Interface) map[string]struct{} {
+func knownCRDs(ctx context.Context, crdClient apiextensionsclient.Interface) (map[string]struct{}, error) {
 	delay := time.Second
 	maxDelay := time.Minute
-	var res *apiextensionv1.CustomResourceDefinitionList
+	var res *crd.CustomResourceDefinitionList
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		var err error
-		res, err = crdClient.ApiextensionsV1().CustomResourceDefinitions().List(context.TODO(), metav1.ListOptions{})
+		res, err = crdClient.ApiextensionsV1().CustomResourceDefinitions().List(ctx, metav1.ListOptions{})
 		if err == nil {
 			break
 		}
@@ -296,10 +330,10 @@ func knownCRDs(crdClient apiextensionsclient.Interface) map[string]struct{} {
 	for _, r := range res.Items {
 		mp[r.Name] = struct{}{}
 	}
-	return mp
+	return mp, nil
 }
 
-func TranslateObject(r runtime.Object, gvk resource.GroupVersionKind, domainSuffix string) *model.Config {
+func TranslateObject(r runtime.Object, gvk config.GroupVersionKind, domainSuffix string) *config.Config {
 	translateFunc, f := translationMap[gvk]
 	if !f {
 		scope.Errorf("unknown type %v", gvk)
@@ -310,11 +344,37 @@ func TranslateObject(r runtime.Object, gvk resource.GroupVersionKind, domainSuff
 	return c
 }
 
-func getObjectMetadata(config model.Config) metav1.ObjectMeta {
+func getObjectMetadata(config config.Config) metav1.ObjectMeta {
 	return metav1.ObjectMeta{
-		Name:        config.Name,
-		Namespace:   config.Namespace,
-		Labels:      config.Labels,
-		Annotations: config.Annotations,
+		Name:            config.Name,
+		Namespace:       config.Namespace,
+		Labels:          config.Labels,
+		Annotations:     config.Annotations,
+		ResourceVersion: config.ResourceVersion,
+		OwnerReferences: config.OwnerReferences,
+		UID:             types.UID(config.UID),
+	}
+}
+
+func genPatchBytes(oldRes, modRes runtime.Object, patchType types.PatchType) ([]byte, error) {
+	oldJSON, err := json.Marshal(oldRes)
+	if err != nil {
+		return nil, fmt.Errorf("failed marhsalling original resource: %v", err)
+	}
+	newJSON, err := json.Marshal(modRes)
+	if err != nil {
+		return nil, fmt.Errorf("failed marhsalling modified resource: %v", err)
+	}
+	switch patchType {
+	case types.JSONPatchType:
+		ops, err := jsonpatch.CreatePatch(oldJSON, newJSON)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(ops)
+	case types.MergePatchType:
+		return jsonmerge.CreateMergePatch(oldJSON, newJSON)
+	default:
+		return nil, fmt.Errorf("unsupported patch type: %v. must be one of JSONPatchType or MergePatchType", patchType)
 	}
 }

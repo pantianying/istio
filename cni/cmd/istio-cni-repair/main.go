@@ -18,16 +18,24 @@ package main
 
 import (
 	"fmt"
+	"net"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 
+	ocprom "contrib.go.opencensus.io/exporter/prometheus"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
+	"go.opencensus.io/stats/view"
 	"go.uber.org/multierr"
 	client "k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
 	"k8s.io/client-go/tools/clientcmd"
 
 	"istio.io/istio/cni/pkg/repair"
+	"istio.io/istio/tools/istio-iptables/pkg/constants"
 	"istio.io/pkg/log"
 )
 
@@ -36,9 +44,7 @@ type ControllerOptions struct {
 	RunAsDaemon   bool            `json:"run_as_daemon"`
 }
 
-var (
-	loggingOptions = log.DefaultOptions()
-)
+var loggingOptions = log.DefaultOptions()
 
 // Parse command line options
 func parseFlags() (filters *repair.Filters, options *ControllerOptions) {
@@ -60,7 +66,7 @@ func parseFlags() (filters *repair.Filters, options *ControllerOptions) {
 		"The expected termination message for the init container when crash-looping because of CNI misconfiguration")
 	pflag.Int(
 		"init-container-exit-code",
-		126,
+		constants.ValidationErrorCode,
 		"Expected exit code for the init container when crash-looping because of CNI misconfiguration")
 
 	pflag.String("label-selectors", "", "A set of label selectors in label=value format that will be added to the pod list filters")
@@ -83,7 +89,7 @@ func parseFlags() (filters *repair.Filters, options *ControllerOptions) {
 
 	pflag.Parse()
 	if err := viper.BindPFlags(pflag.CommandLine); err != nil {
-		log.Fatal("Error parsing command line args: %+v")
+		log.Fatalf("Error parsing command line args: %+v", err)
 	}
 
 	if viper.GetBool("help") {
@@ -183,13 +189,18 @@ func main() {
 
 	podFixer := repair.NewBrokenPodReconciler(clientSet, filters, options.RepairOptions)
 	logCurrentOptions(&podFixer, options)
+	stopCh := make(chan struct{})
+
+	// Start metrics server
+	go func() {
+		setupMonitoring(":15014", "/metrics", stopCh)
+	}()
 
 	if options.RunAsDaemon {
 		rc, err := repair.NewRepairController(podFixer)
 		if err != nil {
 			log.Fatalf("Fatal error constructing repair controller: %+v", err)
 		}
-		stopCh := make(chan struct{})
 		rc.Run(stopCh)
 
 	} else {
@@ -203,5 +214,44 @@ func main() {
 		if err != nil {
 			log.Fatalf(err.Error())
 		}
+	}
+	handleSigTerm(stopCh)
+}
+
+func handleSigTerm(ch chan struct{}) {
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGTERM)
+	go func() {
+		<-sigs
+		close(ch)
+	}()
+}
+
+func setupMonitoring(addr, path string, stop chan struct{}) {
+	mux := http.NewServeMux()
+	var listener net.Listener
+	var err error
+	if listener, err = net.Listen("tcp", addr); err != nil {
+		log.Errorf("unable to listen on socket: %v", err)
+	}
+	exporter, err := ocprom.NewExporter(ocprom.Options{Registry: prometheus.DefaultRegisterer.(*prometheus.Registry)})
+	if err != nil {
+		log.Errorf("could not set up prometheus exporter: %v", err)
+	}
+	view.RegisterExporter(exporter)
+	mux.Handle(path, exporter)
+	monitoringServer := &http.Server{
+		Handler: mux,
+	}
+	go func() {
+		err = monitoringServer.Serve(listener)
+		if err != nil {
+			log.Errorf("error running monitoring http server: %s", err)
+		}
+	}()
+	<-stop
+	err = monitoringServer.Close()
+	if err != nil {
+		log.Errorf("error closing monitoring http server: %s", err)
 	}
 }

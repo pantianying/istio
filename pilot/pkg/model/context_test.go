@@ -28,7 +28,6 @@ import (
 
 	meshconfig "istio.io/api/mesh/v1alpha1"
 	"istio.io/api/networking/v1alpha3"
-
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/serviceregistry/memory"
 	"istio.io/istio/pilot/pkg/serviceregistry/mock"
@@ -57,65 +56,71 @@ func TestNodeMetadata(t *testing.T) {
 					InstanceIPs: []string{"abc", "1.2.3.4"},
 					Raw: map[string]interface{}{
 						"INSTANCE_IPS": "abc,1.2.3.4",
-					}},
+					},
+				},
 			},
 		},
 		{
 			"labels",
 			model.BootstrapNodeMetadata{NodeMetadata: model.NodeMetadata{Labels: map[string]string{"foo": "bar"}}},
 			`{"LABELS":{"foo":"bar"}}`,
-			model.BootstrapNodeMetadata{NodeMetadata: model.NodeMetadata{Labels: map[string]string{"foo": "bar"},
-				Raw: map[string]interface{}{
-					"LABELS": map[string]interface{}{
-						"foo": "bar",
-					},
-				}},
-			},
-		},
-		{
-			"proxy config",
-			model.BootstrapNodeMetadata{NodeMetadata: model.NodeMetadata{
-				ProxyConfig: (*model.NodeMetaProxyConfig)(&meshconfig.ProxyConfig{
-					ConfigPath:             "foo",
-					DrainDuration:          types.DurationProto(time.Second * 5),
-					ControlPlaneAuthPolicy: meshconfig.AuthenticationPolicy_MUTUAL_TLS,
-					EnvoyAccessLogService: &meshconfig.RemoteService{
-						Address: "address",
-						TlsSettings: &v1alpha3.ClientTLSSettings{
-							SubjectAltNames: []string{"san"},
-						},
-					},
-				}),
-			},
-			},
-			// nolint: lll
-			`{"PROXY_CONFIG":{"configPath":"foo","drainDuration":"5s","controlPlaneAuthPolicy":"MUTUAL_TLS","envoyAccessLogService":{"address":"address","tlsSettings":{"subjectAltNames":["san"]}}}}`,
-			model.BootstrapNodeMetadata{NodeMetadata: model.NodeMetadata{
-				ProxyConfig: (*model.NodeMetaProxyConfig)(&meshconfig.ProxyConfig{
-					ConfigPath:             "foo",
-					DrainDuration:          types.DurationProto(time.Second * 5),
-					ControlPlaneAuthPolicy: meshconfig.AuthenticationPolicy_MUTUAL_TLS,
-					EnvoyAccessLogService: &meshconfig.RemoteService{
-						Address: "address",
-						TlsSettings: &v1alpha3.ClientTLSSettings{
-							SubjectAltNames: []string{"san"},
-						},
-					},
-				}),
-				Raw: map[string]interface{}{
-					"PROXY_CONFIG": map[string]interface{}{
-						"drainDuration":          "5s",
-						"configPath":             "foo",
-						"controlPlaneAuthPolicy": "MUTUAL_TLS",
-						"envoyAccessLogService": map[string]interface{}{
-							"address": "address",
-							"tlsSettings": map[string]interface{}{
-								"subjectAltNames": []interface{}{"san"},
-							},
+			model.BootstrapNodeMetadata{
+				NodeMetadata: model.NodeMetadata{
+					Labels: map[string]string{"foo": "bar"},
+					Raw: map[string]interface{}{
+						"LABELS": map[string]interface{}{
+							"foo": "bar",
 						},
 					},
 				},
 			},
+		},
+		{
+			"proxy config",
+			model.BootstrapNodeMetadata{
+				NodeMetadata: model.NodeMetadata{
+					ProxyConfig: (*model.NodeMetaProxyConfig)(&meshconfig.ProxyConfig{
+						ConfigPath:             "foo",
+						DrainDuration:          types.DurationProto(time.Second * 5),
+						ControlPlaneAuthPolicy: meshconfig.AuthenticationPolicy_MUTUAL_TLS,
+						EnvoyAccessLogService: &meshconfig.RemoteService{
+							Address: "address",
+							TlsSettings: &v1alpha3.ClientTLSSettings{
+								SubjectAltNames: []string{"san"},
+							},
+						},
+					}),
+				},
+			},
+			// nolint: lll
+			`{"PROXY_CONFIG":{"configPath":"foo","drainDuration":"5s","controlPlaneAuthPolicy":"MUTUAL_TLS","envoyAccessLogService":{"address":"address","tlsSettings":{"subjectAltNames":["san"]}}}}`,
+			model.BootstrapNodeMetadata{
+				NodeMetadata: model.NodeMetadata{
+					ProxyConfig: (*model.NodeMetaProxyConfig)(&meshconfig.ProxyConfig{
+						ConfigPath:             "foo",
+						DrainDuration:          types.DurationProto(time.Second * 5),
+						ControlPlaneAuthPolicy: meshconfig.AuthenticationPolicy_MUTUAL_TLS,
+						EnvoyAccessLogService: &meshconfig.RemoteService{
+							Address: "address",
+							TlsSettings: &v1alpha3.ClientTLSSettings{
+								SubjectAltNames: []string{"san"},
+							},
+						},
+					}),
+					Raw: map[string]interface{}{
+						"PROXY_CONFIG": map[string]interface{}{
+							"drainDuration":          "5s",
+							"configPath":             "foo",
+							"controlPlaneAuthPolicy": "MUTUAL_TLS",
+							"envoyAccessLogService": map[string]interface{}{
+								"address": "address",
+								"tlsSettings": map[string]interface{}{
+									"subjectAltNames": []interface{}{"san"},
+								},
+							},
+						},
+					},
+				},
 			},
 		},
 	}
@@ -277,7 +282,6 @@ func TestServiceNode(t *testing.T) {
 			t.Errorf("%#v.ServiceNode() => Got %s, want %s", node.in, out, node.out)
 		}
 		in, err := model.ParseServiceNodeWithMetadata(node.out, node.in.Metadata)
-
 		if err != nil {
 			t.Errorf("ParseServiceNode(%q) => Got error %v", node.out, err)
 		}
@@ -291,21 +295,25 @@ func TestParseMetadata(t *testing.T) {
 	cases := []struct {
 		name     string
 		metadata map[string]interface{}
-		out      model.Proxy
+		out      *model.Proxy
 	}{
 		{
 			name: "Basic Case",
-			out: model.Proxy{Type: "sidecar", IPAddresses: []string{"1.1.1.1"}, DNSDomain: "domain", ID: "id", IstioVersion: model.MaxIstioVersion,
-				Metadata: &model.NodeMetadata{Raw: map[string]interface{}{}}},
+			out: &model.Proxy{
+				Type: "sidecar", IPAddresses: []string{"1.1.1.1"}, DNSDomain: "domain", ID: "id", IstioVersion: model.MaxIstioVersion,
+				Metadata: &model.NodeMetadata{Raw: map[string]interface{}{}},
+			},
 		},
 		{
 			name:     "Capture Arbitrary Metadata",
 			metadata: map[string]interface{}{"foo": "bar"},
-			out: model.Proxy{Type: "sidecar", IPAddresses: []string{"1.1.1.1"}, DNSDomain: "domain", ID: "id", IstioVersion: model.MaxIstioVersion,
+			out: &model.Proxy{
+				Type: "sidecar", IPAddresses: []string{"1.1.1.1"}, DNSDomain: "domain", ID: "id", IstioVersion: model.MaxIstioVersion,
 				Metadata: &model.NodeMetadata{
 					Raw: map[string]interface{}{
 						"foo": "bar",
-					}},
+					},
+				},
 			},
 		},
 		{
@@ -315,7 +323,8 @@ func TestParseMetadata(t *testing.T) {
 					"foo": "bar",
 				},
 			},
-			out: model.Proxy{Type: "sidecar", IPAddresses: []string{"1.1.1.1"}, DNSDomain: "domain", ID: "id", IstioVersion: model.MaxIstioVersion,
+			out: &model.Proxy{
+				Type: "sidecar", IPAddresses: []string{"1.1.1.1"}, DNSDomain: "domain", ID: "id", IstioVersion: model.MaxIstioVersion,
 				Metadata: &model.NodeMetadata{
 					Raw: map[string]interface{}{
 						"LABELS": map[string]interface{}{"foo": "bar"},
@@ -329,7 +338,8 @@ func TestParseMetadata(t *testing.T) {
 			metadata: map[string]interface{}{
 				"POD_PORTS": `[{"name":"http","containerPort":8080,"protocol":"TCP"},{"name":"grpc","containerPort":8079,"protocol":"TCP"}]`,
 			},
-			out: model.Proxy{Type: "sidecar", IPAddresses: []string{"1.1.1.1"}, DNSDomain: "domain", ID: "id", IstioVersion: model.MaxIstioVersion,
+			out: &model.Proxy{
+				Type: "sidecar", IPAddresses: []string{"1.1.1.1"}, DNSDomain: "domain", ID: "id", IstioVersion: model.MaxIstioVersion,
 				Metadata: &model.NodeMetadata{
 					Raw: map[string]interface{}{
 						"POD_PORTS": `[{"name":"http","containerPort":8080,"protocol":"TCP"},{"name":"grpc","containerPort":8079,"protocol":"TCP"}]`,
@@ -337,7 +347,8 @@ func TestParseMetadata(t *testing.T) {
 					PodPorts: []model.PodPort{
 						{"http", 8080, "TCP"},
 						{"grpc", 8079, "TCP"},
-					}},
+					},
+				},
 			},
 		},
 	}
@@ -358,8 +369,8 @@ func TestParseMetadata(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to parse service node: %v", err)
 			}
-			if !reflect.DeepEqual(&tt.out, node) {
-				t.Errorf("Got \n%v, want \n%v", node, &tt.out)
+			if !reflect.DeepEqual(*tt.out.Metadata, *node.Metadata) {
+				t.Errorf("Got \n%v, want \n%v", *node.Metadata, *tt.out.Metadata)
 			}
 		})
 	}
@@ -470,17 +481,17 @@ func Test_parseIstioVersion(t *testing.T) {
 		{
 			name: "major.minor",
 			args: args{ver: "1.2"},
-			want: &model.IstioVersion{Major: 1, Minor: 2, Patch: 0},
+			want: &model.IstioVersion{Major: 1, Minor: 2, Patch: 65535},
 		},
 		{
 			name: "dev",
 			args: args{ver: "1.5-alpha.f70faea2aa817eeec0b08f6cc3b5078e5dcf3beb"},
-			want: &model.IstioVersion{Major: 1, Minor: 5, Patch: 0},
+			want: &model.IstioVersion{Major: 1, Minor: 5, Patch: 65535},
 		},
 		{
 			name: "release-major.minor-date",
 			args: args{ver: "release-1.2-123214234"},
-			want: &model.IstioVersion{Major: 1, Minor: 2, Patch: 0},
+			want: &model.IstioVersion{Major: 1, Minor: 2, Patch: 65535},
 		},
 		{
 			name: "master-date",
@@ -543,12 +554,59 @@ func TestSetServiceInstances(t *testing.T) {
 	}
 
 	proxy := &model.Proxy{}
-	if err := proxy.SetServiceInstances(env); err != nil {
-		t.Errorf("SetServiceInstances => Got error %v", err)
-	}
+	proxy.SetServiceInstances(env)
 
 	assert.Equal(t, len(proxy.ServiceInstances), 3)
 	assert.Equal(t, proxy.ServiceInstances[0].Service.Hostname, host.Name("test2.com"))
 	assert.Equal(t, proxy.ServiceInstances[1].Service.Hostname, host.Name("test3.com"))
 	assert.Equal(t, proxy.ServiceInstances[2].Service.Hostname, host.Name("test1.com"))
+}
+
+func TestGlobalUnicastIP(t *testing.T) {
+	cases := []struct {
+		name   string
+		in     []string
+		expect string
+	}{
+		{
+			name:   "single IPv4 (k8s)",
+			in:     []string{"10.0.4.16"},
+			expect: "10.0.4.16",
+		},
+		{
+			name:   "single IPv6 (k8s)",
+			in:     []string{"fc00:f853:ccd:e793::1"},
+			expect: "fc00:f853:ccd:e793::1",
+		},
+		{
+			name:   "multi IPv4 [1st] (VM)",
+			in:     []string{"10.128.0.51", "fc00:f853:ccd:e793::1", "172.17.0.1", "fe80::42:35ff:fec1:7436", "fe80::345d:33ff:fe54:5c8e"},
+			expect: "10.128.0.51",
+		},
+		{
+			name:   "multi IPv6 [1st] (VM)",
+			in:     []string{"fc00:f853:ccd:e793::1", "172.17.0.1", "fe80::42:35ff:fec1:7436", "10.128.0.51", "fe80::345d:33ff:fe54:5c8e"},
+			expect: "fc00:f853:ccd:e793::1",
+		},
+		{
+			name:   "multi IPv4 [2nd] (VM)",
+			in:     []string{"127.0.0.1", "10.128.0.51", "fc00:f853:ccd:e793::1", "172.17.0.1", "fe80::42:35ff:fec1:7436", "fe80::345d:33ff:fe54:5c8e"},
+			expect: "10.128.0.51",
+		},
+		{
+			name:   "multi IPv6 [2nd] (VM)",
+			in:     []string{"fe80::42:35ff:fec1:7436", "fc00:f853:ccd:e793::1", "172.17.0.1", "10.128.0.51", "fe80::345d:33ff:fe54:5c8e"},
+			expect: "fc00:f853:ccd:e793::1",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			var node model.Proxy
+			node.IPAddresses = tt.in
+			node.DiscoverIPVersions()
+			if got := node.GlobalUnicastIP; got != tt.expect {
+				t.Errorf("GlobalUnicastIP = %v, want %v", got, tt.expect)
+			}
+		})
+	}
 }

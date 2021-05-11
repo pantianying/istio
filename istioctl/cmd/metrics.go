@@ -29,9 +29,8 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/spf13/cobra"
 
-	"istio.io/pkg/log"
-
 	"istio.io/istio/istioctl/pkg/clioptions"
+	"istio.io/pkg/log"
 )
 
 var (
@@ -42,10 +41,10 @@ var (
 		Long: `
 Prints the metrics for the specified service(s) when running in Kubernetes.
 
-This command finds a Prometheus pod running in the specified istio system 
+This command finds a Prometheus pod running in the specified istio system
 namespace. It then executes a series of queries per requested workload to
 find the following top-level workload metrics: total requests per second,
-error rate, and request latency at p50, p90, and p99 percentiles. The 
+error rate, and request latency at p50, p90, and p99 percentiles. The
 query results are printed to the console, organized by workload name.
 
 All metrics returned are from server-side reports. This means that latencies
@@ -53,13 +52,11 @@ and error rates are from the perspective of the service itself and not of an
 individual client (or aggregate set of clients). Rates and latencies are
 calculated over a time interval of 1 minute.
 `,
-		Example: `
-# Retrieve workload metrics for productpage-v1 workload
-istioctl experimental metrics productpage-v1
+		Example: `  # Retrieve workload metrics for productpage-v1 workload
+  istioctl experimental metrics productpage-v1
 
-# Retrieve workload metrics for various services in the different namespaces
-istioctl experimental metrics productpage-v1.foo reviews-v1.bar ratings-v1.baz
-`,
+  # Retrieve workload metrics for various services in the different namespaces
+  istioctl experimental metrics productpage-v1.foo reviews-v1.bar ratings-v1.baz`,
 		// nolint: goimports
 		Aliases: []string{"m"},
 		Args: func(cmd *cobra.Command, args []string) error {
@@ -149,7 +146,6 @@ func prometheusAPI(address string) (promv1.API, error) {
 }
 
 func metrics(promAPI promv1.API, workload string) (workloadMetrics, error) {
-
 	parts := strings.Split(workload, ".")
 	wname := parts[0]
 	wns := ""

@@ -15,13 +15,13 @@
 package kube
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 
 	coreV1 "k8s.io/api/core/v1"
 
 	"istio.io/api/annotation"
-
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/serviceregistry"
 	"istio.io/istio/pkg/config/constants"
@@ -97,7 +97,6 @@ func ConvertService(svc coreV1.Service, domainSuffix string, clusterID string) *
 		}
 	}
 	sort.Strings(serviceaccounts)
-
 	istioService := &model.Service{
 		Hostname:        ServiceHostname(svc.Name, svc.Namespace, domainSuffix),
 		Ports:           ports,
@@ -106,10 +105,12 @@ func ConvertService(svc coreV1.Service, domainSuffix string, clusterID string) *
 		MeshExternal:    meshExternal,
 		Resolution:      resolution,
 		CreationTime:    svc.CreationTimestamp.Time,
+		ClusterVIPs:     map[string]string{clusterID: addr},
 		Attributes: model.ServiceAttributes{
 			ServiceRegistry: string(serviceregistry.Kubernetes),
 			Name:            svc.Name,
 			Namespace:       svc.Namespace,
+			Labels:          svc.Labels,
 			UID:             formatUID(svc.Namespace, svc.Name),
 			ExportTo:        exportTo,
 			LabelSelectors:  labelSelectors,
@@ -150,6 +151,13 @@ func ConvertService(svc coreV1.Service, domainSuffix string, clusterID string) *
 		}
 	}
 
+	for _, extIP := range svc.Spec.ExternalIPs {
+		if istioService.Attributes.ClusterExternalAddresses == nil {
+			istioService.Attributes.ClusterExternalAddresses = map[string][]string{}
+		}
+		istioService.Attributes.ClusterExternalAddresses[clusterID] = append(istioService.Attributes.ClusterExternalAddresses[clusterID], extIP)
+	}
+
 	return istioService
 }
 
@@ -185,12 +193,6 @@ func kubeToIstioServiceAccount(saname string, ns string) string {
 
 // SecureNamingSAN creates the secure naming used for SAN verification from pod metadata
 func SecureNamingSAN(pod *coreV1.Pod) string {
-
-	//use the identity annotation
-	if identity, exist := pod.Annotations[annotation.AlphaIdentity.Name]; exist {
-		return spiffe.GenCustomSpiffe(identity)
-	}
-
 	return spiffe.MustGenSpiffeURI(pod.Namespace, pod.Spec.ServiceAccountName)
 }
 
@@ -209,6 +211,16 @@ func KeyFunc(name, namespace string) string {
 		return name
 	}
 	return namespace + "/" + name
+}
+
+// SplitKey returns namespace and name
+func SplitKey(key string) (namespace string, name string, err error) {
+	parts := strings.Split(key, "/")
+	if len(parts) == 2 {
+		return parts[0], parts[1], nil
+	}
+
+	return "", "", fmt.Errorf("unexpected key format: %q", key)
 }
 
 func formatUID(namespace, name string) string {

@@ -18,18 +18,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
-	"strings"
 	"testing"
-
-	"istio.io/istio/pkg/config/constants"
-	"istio.io/istio/pkg/config/schema/collections"
-	"istio.io/istio/pkg/config/schema/gvk"
 
 	"istio.io/api/mesh/v1alpha1"
 	networking "istio.io/api/networking/v1alpha3"
-
+	"istio.io/istio/pkg/config"
+	"istio.io/istio/pkg/config/constants"
 	"istio.io/istio/pkg/config/host"
 	"istio.io/istio/pkg/config/mesh"
+	"istio.io/istio/pkg/config/schema/collections"
+	"istio.io/istio/pkg/config/schema/gvk"
+	"istio.io/istio/pkg/config/visibility"
 )
 
 var (
@@ -115,8 +114,8 @@ var (
 		},
 	}
 
-	configs1 = &Config{
-		ConfigMeta: ConfigMeta{
+	configs1 = &config.Config{
+		Meta: config.Meta{
 			Name:      "foo",
 			Namespace: "not-default",
 		},
@@ -137,17 +136,16 @@ var (
 			},
 		},
 	}
-
-	configs2 = &Config{
-		ConfigMeta: ConfigMeta{
+	configs2 = &config.Config{
+		Meta: config.Meta{
 			Name:      "foo",
 			Namespace: "not-default",
 		},
 		Spec: &networking.Sidecar{},
 	}
 
-	configs3 = &Config{
-		ConfigMeta: ConfigMeta{
+	configs3 = &config.Config{
+		Meta: config.Meta{
 			Name:      "foo",
 			Namespace: "not-default",
 		},
@@ -160,8 +158,8 @@ var (
 		},
 	}
 
-	configs4 = &Config{
-		ConfigMeta: ConfigMeta{
+	configs4 = &config.Config{
+		Meta: config.Meta{
 			Name:      "foo",
 			Namespace: "not-default",
 		},
@@ -179,8 +177,8 @@ var (
 		},
 	}
 
-	configs5 = &Config{
-		ConfigMeta: ConfigMeta{
+	configs5 = &config.Config{
+		Meta: config.Meta{
 			Name:      "foo",
 			Namespace: "not-default",
 		},
@@ -198,8 +196,8 @@ var (
 		},
 	}
 
-	configs6 = &Config{
-		ConfigMeta: ConfigMeta{
+	configs6 = &config.Config{
+		Meta: config.Meta{
 			Name:      "foo",
 			Namespace: "not-default",
 		},
@@ -225,8 +223,8 @@ var (
 		},
 	}
 
-	configs7 = &Config{
-		ConfigMeta: ConfigMeta{
+	configs7 = &config.Config{
+		Meta: config.Meta{
 			Name: "sidecar-scope-ns1-ns2",
 		},
 		Spec: &networking.Sidecar{
@@ -238,12 +236,14 @@ var (
 						Name:     "outbound-tcp",
 					},
 					Bind: "7.7.7.7",
-					Hosts: []string{"*/bookinginfo.com",
+					Hosts: []string{
+						"*/bookinginfo.com",
 						"*/private.com",
 					},
 				},
 				{
-					Hosts: []string{"ns1/*",
+					Hosts: []string{
+						"ns1/*",
 						"*/*.tcp.com",
 					},
 				},
@@ -251,8 +251,8 @@ var (
 		},
 	}
 
-	configs8 = &Config{
-		ConfigMeta: ConfigMeta{
+	configs8 = &config.Config{
+		Meta: config.Meta{
 			Name: "different-port-name",
 		},
 		Spec: &networking.Sidecar{
@@ -269,8 +269,8 @@ var (
 		},
 	}
 
-	configs9 = &Config{
-		ConfigMeta: ConfigMeta{
+	configs9 = &config.Config{
+		Meta: config.Meta{
 			Name: "sidecar-scope-wildcards",
 		},
 		Spec: &networking.Sidecar{
@@ -295,8 +295,8 @@ var (
 		},
 	}
 
-	configs10 = &Config{
-		ConfigMeta: ConfigMeta{
+	configs10 = &config.Config{
+		Meta: config.Meta{
 			Name: "sidecar-scope-with-http-proxy",
 		},
 		Spec: &networking.Sidecar{
@@ -313,8 +313,8 @@ var (
 		},
 	}
 
-	configs11 = &Config{
-		ConfigMeta: ConfigMeta{
+	configs11 = &config.Config{
+		Meta: config.Meta{
 			Name: "sidecar-scope-with-http-proxy-match-virtual-service",
 		},
 		Spec: &networking.Sidecar{
@@ -331,8 +331,8 @@ var (
 		},
 	}
 
-	configs12 = &Config{
-		ConfigMeta: ConfigMeta{
+	configs12 = &config.Config{
+		Meta: config.Meta{
 			Name: "sidecar-scope-with-http-proxy-match-virtual-service-and-service",
 		},
 		Spec: &networking.Sidecar{
@@ -349,8 +349,8 @@ var (
 		},
 	}
 
-	configs13 = &Config{
-		ConfigMeta: ConfigMeta{
+	configs13 = &config.Config{
+		Meta: config.Meta{
 			Name: "sidecar-scope-with-illegal-host",
 		},
 		Spec: &networking.Sidecar{
@@ -366,6 +366,36 @@ var (
 			},
 		},
 	}
+
+	configs14 = &config.Config{
+		Meta: config.Meta{
+			Name: "sidecar-scope-wildcards",
+		},
+		Spec: &networking.Sidecar{
+			Egress: []*networking.IstioEgressListener{
+				{
+					Port: &networking.Port{
+						Number:   7443,
+						Protocol: "GRPC",
+						Name:     "grpc-tls",
+					},
+					Hosts: []string{"*/*"},
+				},
+				{
+					Port: &networking.Port{
+						Number:   7442,
+						Protocol: "HTTP",
+						Name:     "http-tls",
+					},
+					Hosts: []string{"ns2/*"},
+				},
+				{
+					Hosts: []string{"*/*"},
+				},
+			},
+		},
+	}
+
 	services1 = []*Service{
 		{Hostname: "bar"},
 	}
@@ -611,9 +641,88 @@ var (
 		},
 	}
 
-	virtualServices1 = []Config{
+	services15 = []*Service{
 		{
-			ConfigMeta: ConfigMeta{
+			Hostname: "foo.svc.cluster.local",
+			Ports:    port7443,
+			Attributes: ServiceAttributes{
+				Name:      "foo",
+				Namespace: "ns1",
+				ExportTo:  map[visibility.Instance]bool{visibility.Private: true},
+			},
+		},
+		{
+			Hostname: "foo.svc.cluster.local",
+			Ports:    port8000,
+			Attributes: ServiceAttributes{
+				Name:      "foo",
+				Namespace: "ns2",
+			},
+		},
+		{
+			Hostname: "baz.svc.cluster.local",
+			Ports:    port7443,
+			Attributes: ServiceAttributes{
+				Name:      "baz",
+				Namespace: "ns3",
+			},
+		},
+	}
+
+	services16 = []*Service{
+		{
+			Hostname: "foo.svc.cluster.local",
+			Ports:    port7443,
+			Attributes: ServiceAttributes{
+				Name:      "foo",
+				Namespace: "ns1",
+			},
+		},
+		{
+			Hostname: "baz.svc.cluster.local",
+			Ports:    port7443,
+			Attributes: ServiceAttributes{
+				Name:      "baz",
+				Namespace: "ns3",
+			},
+		},
+		{
+			Hostname: "bar.svc.cluster.local",
+			Ports:    port7442,
+			Attributes: ServiceAttributes{
+				Name:      "bar",
+				Namespace: "ns2",
+			},
+		},
+		{
+			Hostname: "barprime.svc.cluster.local",
+			Ports:    port7442,
+			Attributes: ServiceAttributes{
+				Name:      "barprime",
+				Namespace: "ns3",
+			},
+		},
+		{
+			Hostname: "barprime.svc.cluster.local",
+			Ports:    port7442,
+			Attributes: ServiceAttributes{
+				Name:      "barprime",
+				Namespace: "ns3",
+			},
+		},
+		{
+			Hostname: "random.svc.cluster.local",
+			Ports:    port9999,
+			Attributes: ServiceAttributes{
+				Name:      "random",
+				Namespace: "randomns", // nolint
+			},
+		},
+	}
+
+	virtualServices1 = []config.Config{
+		{
+			Meta: config.Meta{
 				GroupVersionKind: collections.IstioNetworkingV1Alpha3Virtualservices.Resource().GroupVersionKind(),
 				Name:             "virtualbar",
 				Namespace:        "foo",
@@ -634,10 +743,10 @@ var (
 func TestCreateSidecarScope(t *testing.T) {
 	tests := []struct {
 		name          string
-		sidecarConfig *Config
+		sidecarConfig *config.Config
 		// list of available service for a given proxy
 		services        []*Service
-		virtualServices []Config
+		virtualServices []config.Config
 		// list of services expected to be in the listener
 		excpectedServices []*Service
 	}{
@@ -718,7 +827,14 @@ func TestCreateSidecarScope(t *testing.T) {
 			configs2,
 			services4,
 			nil,
-			nil,
+			[]*Service{
+				{
+					Hostname: "bar",
+				},
+				{
+					Hostname: "barprime",
+				},
+			},
 		},
 		{
 			"sidecar-with-multiple-egress-noport",
@@ -863,6 +979,46 @@ func TestCreateSidecarScope(t *testing.T) {
 			},
 		},
 		{
+			"wild-card-egress-listener-match-and-all-hosts",
+			configs14,
+			services16,
+			nil,
+			[]*Service{
+				{
+					Hostname: "foo.svc.cluster.local",
+					Ports:    port7443,
+				},
+				{
+					Hostname: "baz.svc.cluster.local",
+					Ports:    port7443,
+				},
+				{
+					Hostname: "bar.svc.cluster.local",
+					Ports:    port7442,
+					Attributes: ServiceAttributes{
+						Name:      "bar",
+						Namespace: "ns2",
+					},
+				},
+				{
+					Hostname: "barprime.svc.cluster.local",
+					Ports:    port7442,
+					Attributes: ServiceAttributes{
+						Name:      "barprime",
+						Namespace: "ns3",
+					},
+				},
+				{
+					Hostname: "random.svc.cluster.local",
+					Ports:    port9999,
+					Attributes: ServiceAttributes{
+						Name:      "random",
+						Namespace: "randomns", // nolint
+					},
+				},
+			},
+		},
+		{
 			"wild-card-egress-listener-match-with-two-ports",
 			configs9,
 			services11,
@@ -896,7 +1052,8 @@ func TestCreateSidecarScope(t *testing.T) {
 					Hostname: "bar",
 				},
 				{
-					Hostname: "barprime"},
+					Hostname: "barprime",
+				},
 				{
 					Hostname: "foo",
 				},
@@ -971,6 +1128,24 @@ func TestCreateSidecarScope(t *testing.T) {
 			},
 		},
 		{
+			"virtual-service-pick-public",
+			configs11,
+			// Ambiguous; same hostname in ns1 and ns2, neither is config namespace
+			// ns1 should always win
+			services15,
+			virtualServices1,
+			[]*Service{
+				{
+					Hostname: "foo.svc.cluster.local",
+					Ports:    port8000,
+				},
+				{
+					Hostname: "baz.svc.cluster.local",
+					Ports:    port7443,
+				},
+			},
+		},
+		{
 			"virtual-service-bad-host",
 			configs11,
 			services9,
@@ -1003,17 +1178,24 @@ func TestCreateSidecarScope(t *testing.T) {
 			meshConfig := mesh.DefaultMeshConfig()
 			ps.Mesh = &meshConfig
 			if tt.services != nil {
-				ps.publicServices = append(ps.publicServices, tt.services...)
+				ps.ServiceIndex.public = append(ps.ServiceIndex.public, tt.services...)
 
 				for _, s := range tt.services {
-					if _, f := ps.ServiceByHostnameAndNamespace[s.Hostname]; !f {
-						ps.ServiceByHostnameAndNamespace[s.Hostname] = map[string]*Service{}
+					if _, f := ps.ServiceIndex.HostnameAndNamespace[s.Hostname]; !f {
+						ps.ServiceIndex.HostnameAndNamespace[s.Hostname] = map[string]*Service{}
 					}
-					ps.ServiceByHostnameAndNamespace[s.Hostname][s.Attributes.Namespace] = s
+					ps.ServiceIndex.HostnameAndNamespace[s.Hostname][s.Attributes.Namespace] = s
 				}
 			}
 			if tt.virtualServices != nil {
-				ps.publicVirtualServicesByGateway[constants.IstioMeshGateway] = append(ps.publicVirtualServicesByGateway[constants.IstioMeshGateway], tt.virtualServices...)
+				// nolint lll
+				ps.virtualServiceIndex.publicByGateway[constants.IstioMeshGateway] = append(ps.virtualServiceIndex.publicByGateway[constants.IstioMeshGateway], tt.virtualServices...)
+			}
+
+			ps.exportToDefaults = exportToDefaults{
+				virtualService:  map[visibility.Instance]bool{visibility.Public: true},
+				service:         map[visibility.Instance]bool{visibility.Public: true},
+				destinationRule: map[visibility.Instance]bool{visibility.Public: true},
 			}
 
 			sidecarConfig := tt.sidecarConfig
@@ -1021,42 +1203,14 @@ func TestCreateSidecarScope(t *testing.T) {
 			configuredListeneres := 1
 			if sidecarConfig != nil {
 				r := sidecarConfig.Spec.(*networking.Sidecar)
-				configuredListeneres = len(r.Egress)
+				if len(r.Egress) > 0 {
+					configuredListeneres = len(r.Egress)
+				}
 			}
 
 			numberListeners := len(sidecarScope.EgressListeners)
 			if numberListeners != configuredListeneres {
 				t.Errorf("Expected %d listeners, Got: %d", configuredListeneres, numberListeners)
-			}
-
-			if sidecarConfig != nil {
-				a := sidecarConfig.Spec.(*networking.Sidecar)
-				for _, egress := range a.Egress {
-					for _, egressHost := range egress.Hosts {
-						parts := strings.SplitN(egressHost, "/", 2)
-						if len(parts) < 2 {
-							continue
-						}
-						found = false
-						for _, listeners := range sidecarScope.EgressListeners {
-							if sidecarScopeHosts, ok := listeners.listenerHosts[parts[0]]; ok {
-								for _, sidecarScopeHost := range sidecarScopeHosts {
-									if sidecarScopeHost == host.Name(parts[1]) &&
-										listeners.IstioListener.Port == egress.Port {
-										found = true
-										break
-									}
-								}
-							}
-							if found {
-								break
-							}
-						}
-						if !found {
-							t.Errorf("Did not find %v entry in any listener", egressHost)
-						}
-					}
-				}
 			}
 
 			for _, s1 := range sidecarScope.services {
@@ -1075,7 +1229,7 @@ func TestCreateSidecarScope(t *testing.T) {
 					}
 				}
 				if !found {
-					t.Errorf("Unexpected service %v found in SidecarScope", s1.Hostname)
+					t.Errorf("Expected service %v in SidecarScope but not found", s1.Hostname)
 				}
 			}
 
@@ -1088,7 +1242,7 @@ func TestCreateSidecarScope(t *testing.T) {
 					}
 				}
 				if !found {
-					t.Errorf("Expected service %v in SidecarScope, but did not find it", s1)
+					t.Errorf("UnExpected service %v in SidecarScope", s1)
 				}
 			}
 			// TODO destination rule
@@ -1190,10 +1344,8 @@ func TestIstioEgressListenerWrapper(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ilw := &IstioEgressListenerWrapper{
-				listenerHosts: tt.listenerHosts,
-			}
-			got := ilw.selectServices(tt.services, tt.namespace)
+			ilw := &IstioEgressListenerWrapper{}
+			got := ilw.selectServices(tt.services, tt.namespace, tt.listenerHosts)
 			if !reflect.DeepEqual(got, tt.expected) {
 				gots, _ := json.MarshalIndent(got, "", "  ")
 				expecteds, _ := json.MarshalIndent(tt.expected, "", "  ")
@@ -1231,11 +1383,14 @@ func TestContainsEgressDependencies(t *testing.T) {
 		{"Wrong Namespace", []string{"ns/*"}, allContains("other-ns", false)},
 		{"No Sidecar", nil, allContains("ns", true)},
 		{"No Sidecar Other Namespace", nil, allContains("other-ns", false)},
+		{"clusterScope resource", []string{"*/*"}, map[ConfigKey]bool{
+			{gvk.AuthorizationPolicy, "authz", "default"}: true,
+		}},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := &Config{
-				ConfigMeta: ConfigMeta{
+			cfg := &config.Config{
+				Meta: config.Meta{
 					Name:      "foo",
 					Namespace: "default",
 				},
@@ -1255,9 +1410,9 @@ func TestContainsEgressDependencies(t *testing.T) {
 				{Hostname: "nomatch", Attributes: ServiceAttributes{Namespace: "nomatch"}},
 				{Hostname: svcName, Attributes: ServiceAttributes{Namespace: nsName}},
 			}
-			virtualServices := []Config{
+			virtualServices := []config.Config{
 				{
-					ConfigMeta: ConfigMeta{
+					Meta: config.Meta{
 						Name:      vsName,
 						Namespace: nsName,
 					},
@@ -1266,9 +1421,9 @@ func TestContainsEgressDependencies(t *testing.T) {
 					},
 				},
 			}
-			destinationRules := []Config{
+			destinationRules := []config.Config{
 				{
-					ConfigMeta: ConfigMeta{
+					Meta: config.Meta{
 						Name:      drName,
 						Namespace: nsName,
 					},
@@ -1278,8 +1433,9 @@ func TestContainsEgressDependencies(t *testing.T) {
 					},
 				},
 			}
-			ps.publicServices = append(ps.publicServices, services...)
-			ps.publicVirtualServicesByGateway[constants.IstioMeshGateway] = append(ps.publicVirtualServicesByGateway[constants.IstioMeshGateway], virtualServices...)
+			ps.ServiceIndex.public = append(ps.ServiceIndex.public, services...)
+			// nolint lll
+			ps.virtualServiceIndex.publicByGateway[constants.IstioMeshGateway] = append(ps.virtualServiceIndex.publicByGateway[constants.IstioMeshGateway], virtualServices...)
 			ps.SetDestinationRules(destinationRules)
 			sidecarScope := ConvertToSidecarScope(ps, cfg, "default")
 			if len(tt.egress) == 0 {
@@ -1295,17 +1451,63 @@ func TestContainsEgressDependencies(t *testing.T) {
 	}
 }
 
-func TestSidecarOutboundTrafficPolicy(t *testing.T) {
+func TestRootNsSidecarDependencies(t *testing.T) {
+	cases := []struct {
+		name   string
+		egress []string
 
-	configWithoutOutboundTrafficPolicy := &Config{
-		ConfigMeta: ConfigMeta{
+		contains map[ConfigKey]bool
+	}{
+		{"authorizationPolicy in same ns with workload", []string{"*/*"}, map[ConfigKey]bool{
+			{gvk.AuthorizationPolicy, "authz", "default"}: true,
+		}},
+		{"authorizationPolicy in different ns with workload", []string{"*/*"}, map[ConfigKey]bool{
+			{gvk.AuthorizationPolicy, "authz", "ns1"}: false,
+		}},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{
+				Meta: config.Meta{
+					Name:      "foo",
+					Namespace: constants.IstioSystemNamespace,
+				},
+				Spec: &networking.Sidecar{
+					Egress: []*networking.IstioEgressListener{
+						{
+							Hosts: tt.egress,
+						},
+					},
+				},
+			}
+			ps := NewPushContext()
+			meshConfig := mesh.DefaultMeshConfig()
+			ps.Mesh = &meshConfig
+			sidecarScope := ConvertToSidecarScope(ps, cfg, "default")
+			if len(tt.egress) == 0 {
+				sidecarScope = DefaultSidecarScopeForNamespace(ps, "default")
+			}
+
+			for k, v := range tt.contains {
+				if ok := sidecarScope.DependsOnConfig(k); ok != v {
+					t.Fatalf("Expected contains %v-%v, but no match", k, v)
+				}
+			}
+		})
+	}
+}
+
+func TestSidecarOutboundTrafficPolicy(t *testing.T) {
+	configWithoutOutboundTrafficPolicy := &config.Config{
+		Meta: config.Meta{
 			Name:      "foo",
 			Namespace: "not-default",
 		},
 		Spec: &networking.Sidecar{},
 	}
-	configRegistryOnly := &Config{
-		ConfigMeta: ConfigMeta{
+	configRegistryOnly := &config.Config{
+		Meta: config.Meta{
 			Name:      "foo",
 			Namespace: "not-default",
 		},
@@ -1315,8 +1517,8 @@ func TestSidecarOutboundTrafficPolicy(t *testing.T) {
 			},
 		},
 	}
-	configAllowAny := &Config{
-		ConfigMeta: ConfigMeta{
+	configAllowAny := &config.Config{
+		Meta: config.Meta{
 			Name:      "foo",
 			Namespace: "not-default",
 		},
@@ -1338,7 +1540,7 @@ outboundTrafficPolicy:
 	tests := []struct {
 		name                  string
 		meshConfig            v1alpha1.MeshConfig
-		sidecar               *Config
+		sidecar               *config.Config
 		outboundTrafficPolicy *networking.OutboundTrafficPolicy
 	}{
 		{
@@ -1423,7 +1625,6 @@ outboundTrafficPolicy:
 				t.Errorf("Unexpected sidecar outbound traffic, want %v, found %v",
 					test.outboundTrafficPolicy, sidecarScope.OutboundTrafficPolicy)
 			}
-
 		})
 	}
 }

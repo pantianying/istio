@@ -22,7 +22,6 @@ import (
 
 	envoy_corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	xdsapi "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
-	"github.com/golang/protobuf/ptypes"
 	structpb "github.com/golang/protobuf/ptypes/struct"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -75,12 +74,12 @@ func getRemoteInfoWrapper(pc **cobra.Command, opts *clioptions.ControlPlaneOptio
 	return func() (*istioVersion.MeshInfo, error) {
 		remInfo, err := getRemoteInfo(*opts)
 		if err != nil {
-			fmt.Fprintf((*pc).OutOrStdout(), "%v\n", err)
+			fmt.Fprintf((*pc).OutOrStderr(), "%v\n", err)
 			// Return nil so that the client version is printed
 			return nil, nil
 		}
 		if remInfo == nil {
-			fmt.Fprintf((*pc).OutOrStdout(), "Istio is not present in the cluster with namespace %q\n", istioNamespace)
+			fmt.Fprintf((*pc).OutOrStderr(), "Istio is not present in the cluster with namespace %q\n", istioNamespace)
 		}
 		return remInfo, err
 	}
@@ -112,24 +111,21 @@ func xdsVersionCommand() *cobra.Command {
 		}
 		return nil
 	}
-	versionCmd.Example = `# Retrieve version information directly from XDS, without security
-istioctl x version --xds-address localhost:15012
+	versionCmd.Example = `# Retrieve version information directly from the control plane, using token security
+# (This is the usual way to get the control plane version with an out-of-cluster control plane.)
+istioctl x version --xds-address istio.cloudprovider.example.com:15012
 
-# Retrieve version information directly from XDS, with security
-# (the certificates must be retrieved before this step)
-istioctl x version --xds-address localhost:15010 --cert-dir ~/.istio-certs
+# Retrieve version information via Kubernetes config, using token security
+# (This is the usual way to get the control plane version with an in-cluster control plane.)
+istioctl x version
 
-# Retrieve version information via XDS from all Istio pods in a Kubernetes cluster
-# (without security)
-istioctl x version --xds-port 15010
+# Retrieve version information directly from the control plane, using RSA certificate security
+# (Certificates must be obtained before this step.  The --cert-dir flag lets istioctl bypass the Kubernetes API server.)
+istioctl x version --xds-address istio.example.com:15012 --cert-dir ~/.istio-certs
 
-# Retrieve version information via XDS from all Istio pods in a Kubernetes cluster
-# (the certificates must be retrieved before this step)
-istioctl x version --cert-dir ~/.istio-certs
-
-# Retrieve version information via XDS from default control plane Istio pods
-# in a Kubernetes cluster, without security
-istioctl x version --xds-label istio.io/rev=default --xds-port 15010
+# Retrieve version information via XDS from specific control plane in multi-control plane in-cluster configuration
+# (Select a specific control plane in an in-cluster canary Istio configuration.)
+istioctl x version --xds-label istio.io/rev=default
 `
 
 	versionCmd.Flags().VisitAll(func(flag *pflag.Flag) {
@@ -155,16 +151,13 @@ istioctl x version --xds-label istio.io/rev=default --xds-port 15010
 func xdsRemoteVersionWrapper(opts *clioptions.ControlPlaneOptions, centralOpts *clioptions.CentralControlPlaneOptions, outXDS **xdsapi.DiscoveryResponse) func() (*istioVersion.MeshInfo, error) {
 	return func() (*istioVersion.MeshInfo, error) {
 		xdsRequest := xdsapi.DiscoveryRequest{
-			Node: &envoy_corev3.Node{
-				Id: "sidecar~0.0.0.0~debug~cluster.local",
-			},
 			TypeUrl: "istio.io/connections",
 		}
 		kubeClient, err := kubeClientWithRevision(kubeconfig, configContext, opts.Revision)
 		if err != nil {
 			return nil, err
 		}
-		xdsResponse, err := multixds.RequestAndProcessXds(&xdsRequest, centralOpts, istioNamespace, kubeClient)
+		xdsResponse, err := multixds.RequestAndProcessXds(&xdsRequest, *centralOpts, istioNamespace, kubeClient)
 		if err != nil {
 			return nil, err
 		}
@@ -200,7 +193,7 @@ func xdsProxyVersionWrapper(xdsResponse **xdsapi.DiscoveryResponse) func() (*[]i
 			switch resource.TypeUrl {
 			case "type.googleapis.com/envoy.config.core.v3.Node":
 				node := envoy_corev3.Node{}
-				err := ptypes.UnmarshalAny(resource, &node)
+				err := resource.UnmarshalTo(&node)
 				if err != nil {
 					return nil, fmt.Errorf("could not unmarshal Node: %w", err)
 				}

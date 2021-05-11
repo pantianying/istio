@@ -21,10 +21,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
-	"istio.io/istio/pkg/adsc"
-
-	"istio.io/pkg/log"
-
 	configaggregate "istio.io/istio/pilot/pkg/config/aggregate"
 	"istio.io/istio/pilot/pkg/config/memory"
 	"istio.io/istio/pilot/pkg/model"
@@ -32,6 +28,7 @@ import (
 	"istio.io/istio/pilot/pkg/serviceregistry/aggregate"
 	controllermemory "istio.io/istio/pilot/pkg/serviceregistry/memory"
 	"istio.io/istio/pilot/pkg/serviceregistry/serviceentry"
+	"istio.io/istio/pkg/adsc"
 	"istio.io/istio/pkg/config/mesh"
 	"istio.io/istio/pkg/config/schema/collections"
 )
@@ -75,7 +72,7 @@ type SimpleServer struct {
 // Can be used in tests, or as a minimal XDS discovery server with no dependency on K8S or
 // the complex bootstrap used by Istiod. A memory registry and memory config store are used to
 // generate the configs - they can be programmatically updated.
-func NewXDS() *SimpleServer {
+func NewXDS(stop chan struct{}) *SimpleServer {
 	// Prepare a working XDS server, with aggregate config and registry stores and a memory store for each.
 	// TODO: refactor bootstrap code to use this server, and add more registries.
 
@@ -85,8 +82,9 @@ func NewXDS() *SimpleServer {
 	mc := mesh.DefaultMeshConfig()
 	env.Watcher = mesh.NewFixedWatcher(&mc)
 	env.PushContext.Mesh = env.Watcher.Mesh()
+	env.Init()
 
-	ds := NewDiscoveryServer(env, nil)
+	ds := NewDiscoveryServer(env, nil, "istiod", "istio-system")
 	ds.CachesSynced()
 
 	// Config will have a fixed format:
@@ -107,7 +105,7 @@ func NewXDS() *SimpleServer {
 	s.MemoryConfigStore = model.MakeIstioStore(configController)
 
 	// Endpoints/Clusters - using the config store for ServiceEntries
-	serviceControllers := aggregate.NewController()
+	serviceControllers := aggregate.NewController(aggregate.Options{})
 
 	serviceEntryStore := serviceentry.NewServiceDiscovery(configController, s.MemoryConfigStore, ds)
 	serviceEntryRegistry := serviceregistry.Simple{
@@ -127,7 +125,7 @@ func NewXDS() *SimpleServer {
 	})
 	env.ServiceDiscovery = serviceControllers
 
-	go configController.Run(make(chan struct{}))
+	go configController.Run(stop)
 
 	// configStoreCache - with HasSync interface
 	aggregateConfigController, err := configaggregate.MakeCache([]model.ConfigStoreCache{
@@ -151,13 +149,12 @@ func (s *SimpleServer) StartGRPC(addr string) error {
 	}
 	gs := grpc.NewServer()
 	s.DiscoveryServer.Register(gs)
-	s.DiscoveryServer.RegisterLegacyv2(gs)
 	reflection.Register(gs)
 	s.GRPCListener = lis
 	go func() {
 		err = gs.Serve(lis)
 		if err != nil {
-			log.Infoa("Serve done ", err)
+			log.Info("Serve done ", err)
 		}
 	}()
 	return nil
@@ -173,9 +170,13 @@ type ProxyGen struct {
 // HandleResponse will dispatch a response from a federated
 // XDS server to all connections listening for that type.
 func (p *ProxyGen) HandleResponse(con *adsc.ADSC, res *discovery.DiscoveryResponse) {
+	clients := p.server.DiscoveryServer.ClientsOf(res.TypeUrl)
+	if len(clients) == 0 {
+		return
+	}
 	// TODO: filter the push to only connections that
 	// match a filter.
-	p.server.DiscoveryServer.PushAll(res)
+	p.server.DiscoveryServer.SendResponse(clients, res)
 }
 
 func (s *SimpleServer) NewProxy() *ProxyGen {
@@ -202,9 +203,9 @@ func (p *ProxyGen) Close() {
 // Responses will be forwarded back to the client.
 //
 // TODO: allow clients to indicate which requests they handle ( similar with topic )
-func (p *ProxyGen) Generate(proxy *model.Proxy, push *model.PushContext, w *model.WatchedResource, updates model.XdsUpdates) model.Resources {
+func (p *ProxyGen) Generate(proxy *model.Proxy, push *model.PushContext, w *model.WatchedResource, updates *model.PushRequest) (model.Resources, error) {
 	if p.adsc == nil {
-		return nil
+		return nil, nil
 	}
 
 	// TODO: track requests to connections, so resonses from server are dispatched to the right con
@@ -213,8 +214,8 @@ func (p *ProxyGen) Generate(proxy *model.Proxy, push *model.PushContext, w *mode
 	// Need to change the signature of Generator to take Request as parameter.
 	err := p.adsc.Send(w.LastRequest)
 	if err != nil {
-		log.Debuga("Failed to send, connection probably closed ", err)
+		log.Debug("Failed to send, connection probably closed ", err)
 	}
 
-	return nil
+	return nil, nil
 }

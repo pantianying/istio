@@ -16,17 +16,15 @@
 package mesh
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
-	v12 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -60,7 +58,11 @@ func initLogsOrExit(_ *rootArgs) {
 	}
 }
 
+var logMutex = sync.Mutex{}
+
 func configLogs(opt *log.Options) error {
+	logMutex.Lock()
+	defer logMutex.Unlock()
 	op := []string{"stderr"}
 	opt2 := *opt
 	opt2.OutputPaths = op
@@ -159,7 +161,7 @@ func BuildClientConfig(kubeconfig, context string) (*rest.Config, error) {
 		}
 	}
 
-	//Config loading rules:
+	// Config loading rules:
 	// 1. kubeconfig if it not empty string
 	// 2. In cluster config if running in-cluster
 	// 3. Config(s) in KUBECONFIG environment variable
@@ -200,7 +202,7 @@ func applyManifest(restConfig *rest.Config, client client.Client, manifestStr st
 		Name:    componentName,
 		Content: manifestStr,
 	}
-	_, _, err = reconciler.ApplyManifest(ms)
+	_, _, err = reconciler.ApplyManifest(ms, reconciler.CheckSSAEnabled())
 	return err
 }
 
@@ -232,28 +234,13 @@ func getCRAndNamespaceFromFile(filePath string, l clog.Logger) (customResource s
 		return "", "", fmt.Errorf("could not read values from file %s: %s", filePath, err)
 	}
 	customResource = string(b)
-	istioNamespace = v1alpha1.Namespace(mergedIOPS)
+	istioNamespace = mergedIOPS.Namespace
 	return
 }
 
 // createNamespace creates a namespace using the given k8s interface.
-func createNamespace(cs kubernetes.Interface, namespace string) error {
-	if namespace == "" {
-		// Setup default namespace
-		namespace = "istio-system"
-	}
-
-	ns := &v1.Namespace{ObjectMeta: v12.ObjectMeta{
-		Name: namespace,
-		Labels: map[string]string{
-			"istio-injection": "disabled",
-		},
-	}}
-	_, err := cs.CoreV1().Namespaces().Create(context.TODO(), ns, v12.CreateOptions{})
-	if err != nil && !errors.IsAlreadyExists(err) {
-		return fmt.Errorf("failed to create namespace %v: %v", namespace, err)
-	}
-	return nil
+func createNamespace(cs kubernetes.Interface, namespace string, network string) error {
+	return helmreconciler.CreateNamespace(cs, namespace, network)
 }
 
 // saveIOPToCluster saves the state in an IOP CR in the cluster.
@@ -262,5 +249,5 @@ func saveIOPToCluster(reconciler *helmreconciler.HelmReconciler, iop string) err
 	if err != nil {
 		return err
 	}
-	return reconciler.ApplyObject(obj.UnstructuredObject())
+	return reconciler.ApplyObject(obj.UnstructuredObject(), false)
 }

@@ -17,8 +17,11 @@ package model
 import (
 	"fmt"
 
-	networking "istio.io/api/networking/v1alpha3"
+	"github.com/gogo/protobuf/proto"
 
+	networking "istio.io/api/networking/v1alpha3"
+	"istio.io/istio/pkg/config"
+	"istio.io/istio/pkg/config/host"
 	"istio.io/istio/pkg/config/visibility"
 )
 
@@ -32,9 +35,9 @@ import (
 // 2. If the original rule did not have any top level traffic policy, traffic policies from the new rule will be
 // used.
 // 3. If the original rule did not have any exportTo, exportTo settings from the new rule will be used.
-func (ps *PushContext) mergeDestinationRule(p *processedDestRules, destRuleConfig Config, exportToMap map[visibility.Instance]bool) {
+func (ps *PushContext) mergeDestinationRule(p *processedDestRules, destRuleConfig config.Config, exportToMap map[visibility.Instance]bool) {
 	rule := destRuleConfig.Spec.(*networking.DestinationRule)
-	resolvedHost := ResolveShortnameToFQDN(rule.Host, destRuleConfig.ConfigMeta)
+	resolvedHost := ResolveShortnameToFQDN(rule.Host, destRuleConfig.Meta)
 
 	if mdr, exists := p.destRule[resolvedHost]; exists {
 		// Deep copy destination rule, to prevent mutate it later when merge with a new one.
@@ -56,7 +59,7 @@ func (ps *PushContext) mergeDestinationRule(p *processedDestRules, destRuleConfi
 				mergedRule.Subsets = append(mergedRule.Subsets, subset)
 			} else {
 				// duplicate subset
-				ps.AddMetric(DuplicatedSubsets, string(resolvedHost), nil,
+				ps.AddMetric(DuplicatedSubsets, string(resolvedHost), "",
 					fmt.Sprintf("Duplicate subset %s found while merging destination rules for %s",
 						subset.Name, string(resolvedHost)))
 			}
@@ -79,6 +82,41 @@ func (ps *PushContext) mergeDestinationRule(p *processedDestRules, destRuleConfi
 
 	// DestinationRule does not exist for the resolved host so add it
 	p.hosts = append(p.hosts, resolvedHost)
+	if p.hostsMap == nil {
+		p.hostsMap = make(map[host.Name]struct{})
+	}
+	p.hostsMap[resolvedHost] = struct{}{}
 	p.destRule[resolvedHost] = &destRuleConfig
 	p.exportTo[resolvedHost] = exportToMap
+}
+
+// inheritDestinationRule child config inherits settings from parent mesh/namespace
+func (ps *PushContext) inheritDestinationRule(parent, child *config.Config) *config.Config {
+	if parent == nil {
+		return child
+	}
+	if child == nil {
+		return parent
+	}
+
+	parentDR := parent.Spec.(*networking.DestinationRule)
+	if parentDR.TrafficPolicy == nil {
+		return child
+	}
+
+	merged := parent.DeepCopy()
+	// merge child into parent, child fields will overwrite parent's
+	proto.Merge(merged.Spec.(proto.Message), child.Spec.(proto.Message))
+	merged.Meta = child.Meta
+	merged.Status = child.Status
+
+	childDR := child.Spec.(*networking.DestinationRule)
+	// if parent has MUTUAL+certs/secret specified and child specifies SIMPLE, could break caCertificates
+	// if both parent and child specify TLS context, child's will be used only
+	if parentDR.TrafficPolicy.Tls != nil && (childDR.TrafficPolicy != nil && childDR.TrafficPolicy.Tls != nil) {
+		mergedDR := merged.Spec.(*networking.DestinationRule)
+		mergedDR.TrafficPolicy.Tls = childDR.TrafficPolicy.Tls.DeepCopy()
+	}
+
+	return &merged
 }

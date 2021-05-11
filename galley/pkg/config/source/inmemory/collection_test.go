@@ -19,14 +19,13 @@ import (
 
 	. "github.com/onsi/gomega"
 
-	"istio.io/pkg/log"
-
 	"istio.io/istio/galley/pkg/config/scope"
 	"istio.io/istio/galley/pkg/config/testing/basicmeta"
 	"istio.io/istio/galley/pkg/config/testing/data"
 	"istio.io/istio/galley/pkg/config/testing/fixtures"
 	"istio.io/istio/pkg/config/event"
 	"istio.io/istio/pkg/config/resource"
+	"istio.io/pkg/log"
 )
 
 func TestCollection_Start_Empty(t *testing.T) {
@@ -79,7 +78,8 @@ func TestCollection_Update(t *testing.T) {
 	expected := []event.Event{
 		data.Event1Col1AddItem1,
 		event.FullSyncFor(basicmeta.K8SCollection1),
-		data.Event1Col1UpdateItem1}
+		data.Event1Col1UpdateItem1,
+	}
 
 	actual := acc.Events()
 	g.Expect(actual).To(Equal(expected))
@@ -100,7 +100,8 @@ func TestCollection_Delete(t *testing.T) {
 	expected := []event.Event{
 		data.Event1Col1AddItem1,
 		event.FullSyncFor(basicmeta.K8SCollection1),
-		data.Event1Col1DeleteItem1}
+		data.Event1Col1DeleteItem1,
+	}
 
 	actual := acc.Events()
 	g.Expect(actual).To(Equal(expected))
@@ -120,7 +121,8 @@ func TestCollection_Delete_NoItem(t *testing.T) {
 
 	expected := []event.Event{
 		data.Event1Col1AddItem1,
-		event.FullSyncFor(basicmeta.K8SCollection1)}
+		event.FullSyncFor(basicmeta.K8SCollection1),
+	}
 
 	actual := acc.Events()
 	g.Expect(actual).To(Equal(expected))
@@ -180,7 +182,8 @@ func TestCollection_StopStart(t *testing.T) {
 
 	expected := []event.Event{
 		data.Event1Col1AddItem1,
-		event.FullSyncFor(basicmeta.K8SCollection1)}
+		event.FullSyncFor(basicmeta.K8SCollection1),
+	}
 
 	g.Eventually(acc.Events).Should(Equal(expected))
 

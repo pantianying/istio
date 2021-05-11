@@ -38,12 +38,15 @@ type Config struct {
 	UDSServer     string
 	Dialer        common.Dialer
 	Port          *common.Port
+	ListenerIP    string
+	IstioVersion  string
 }
 
 // Instance of an endpoint that serves the Echo application on a single port/protocol.
 type Instance interface {
 	io.Closer
 	Start(onReady OnReadyFunc) error
+	GetConfig() Config
 }
 
 // New creates a new endpoint Instance.

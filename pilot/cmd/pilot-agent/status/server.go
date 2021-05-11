@@ -24,6 +24,7 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"regexp"
 	"strconv"
@@ -37,17 +38,14 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/expfmt"
 	"go.opencensus.io/stats/view"
-
-	"istio.io/pkg/env"
-
-	"istio.io/istio/pilot/pkg/model"
-
-	"istio.io/pkg/log"
-
-	"istio.io/istio/pilot/cmd/pilot-agent/status/ready"
-
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+
+	"istio.io/istio/pilot/cmd/pilot-agent/metrics"
+	"istio.io/istio/pilot/cmd/pilot-agent/status/ready"
+	"istio.io/istio/pilot/pkg/model"
+	"istio.io/istio/pkg/kube/apimirror"
+	"istio.io/pkg/env"
+	"istio.io/pkg/log"
 )
 
 const (
@@ -61,14 +59,25 @@ const (
 	// indicates that httpbin container liveness prober port is 8080 and probing path is /hello.
 	// This environment variable should never be set manually.
 	KubeAppProberEnvName = "ISTIO_KUBE_APP_PROBERS"
+
+	localHostIPv4 = "127.0.0.1"
+	localHostIPv6 = "[::1]"
+)
+
+var (
+	UpstreamLocalAddressIPv4 = &net.TCPAddr{IP: net.ParseIP("127.0.0.6")}
+	UpstreamLocalAddressIPv6 = &net.TCPAddr{IP: net.ParseIP("[::6]")}
 )
 
 var PrometheusScrapingConfig = env.RegisterStringVar("ISTIO_PROMETHEUS_ANNOTATIONS", "", "")
 
 var (
-	appProberPattern = regexp.MustCompile(`^/app-health/[^/]+/(livez|readyz)$`)
+	appProberPattern = regexp.MustCompile(`^/app-health/[^/]+/(livez|readyz|startupz)$`)
 
 	promRegistry *prometheus.Registry
+
+	LegacyLocalhostProbeDestination = env.RegisterBoolVar("REWRITE_PROBE_LEGACY_LOCALHOST_DESTINATION", false,
+		"If enabled, readiness probes will be sent to 'localhost'. Otherwise, they will be sent to the Pod's IP, matching Kubernetes' behavior.")
 )
 
 // KubeAppProbers holds the information about a Kubernetes pod prober.
@@ -79,29 +88,35 @@ type KubeAppProbers map[string]*Prober
 
 // Prober represents a single container prober
 type Prober struct {
-	HTTPGet        *corev1.HTTPGetAction `json:"httpGet"`
-	TimeoutSeconds int32                 `json:"timeoutSeconds,omitempty"`
+	HTTPGet        *apimirror.HTTPGetAction `json:"httpGet"`
+	TimeoutSeconds int32                    `json:"timeoutSeconds,omitempty"`
 }
 
-// Config for the status server.
-type Config struct {
-	LocalHostAddr string
+// Options for the status server.
+type Options struct {
+	// Ip of the pod. Note: this is only applicable for Kubernetes pods and should only be used for
+	// the prober.
+	PodIP string
 	// KubeAppProbers is a json with Kubernetes application prober config encoded.
 	KubeAppProbers string
 	NodeType       model.NodeType
 	StatusPort     uint16
 	AdminPort      uint16
+	IPv6           bool
+	Probes         []ready.Prober
 }
 
 // Server provides an endpoint for handling status probes.
 type Server struct {
-	ready               *ready.Probe
-	prometheus          *PrometheusScrapeConfiguration
-	mutex               sync.RWMutex
-	appKubeProbers      KubeAppProbers
-	statusPort          uint16
-	lastProbeSuccessful bool
-	envoyStatsPort      int
+	ready                 []ready.Prober
+	prometheus            *PrometheusScrapeConfiguration
+	mutex                 sync.RWMutex
+	appProbersDestination string
+	appKubeProbers        KubeAppProbers
+	appProbeClient        map[string]*http.Client
+	statusPort            uint16
+	lastProbeSuccessful   bool
+	envoyStatsPort        int
 }
 
 func init() {
@@ -120,33 +135,25 @@ func init() {
 }
 
 // NewServer creates a new status server.
-func NewServer(config Config) (*Server, error) {
+func NewServer(config Options) (*Server, error) {
+	localhost := localHostIPv4
+	if config.IPv6 {
+		localhost = localHostIPv6
+	}
+	probes := make([]ready.Prober, 0)
+	probes = append(probes, &ready.Probe{
+		LocalHostAddr: localhost,
+		AdminPort:     config.AdminPort,
+	})
+	probes = append(probes, config.Probes...)
 	s := &Server{
-		statusPort: config.StatusPort,
-		ready: &ready.Probe{
-			LocalHostAddr: config.LocalHostAddr,
-			AdminPort:     config.AdminPort,
-			NodeType:      config.NodeType,
-		},
-		envoyStatsPort: 15090,
+		statusPort:            config.StatusPort,
+		ready:                 probes,
+		appProbersDestination: config.PodIP,
+		envoyStatsPort:        15090,
 	}
-	if config.KubeAppProbers == "" {
-		return s, nil
-	}
-	if err := json.Unmarshal([]byte(config.KubeAppProbers), &s.appKubeProbers); err != nil {
-		return nil, fmt.Errorf("failed to decode app prober err = %v, json string = %v", err, config.KubeAppProbers)
-	}
-	// Validate the map key matching the regex pattern.
-	for path, prober := range s.appKubeProbers {
-		if !appProberPattern.Match([]byte(path)) {
-			return nil, fmt.Errorf(`invalid key, must be in form of regex pattern ^/app-health/[^\/]+/(livez|readyz)$`)
-		}
-		if prober.HTTPGet == nil {
-			return nil, fmt.Errorf(`invalid prober type, must be of type httpGet`)
-		}
-		if prober.HTTPGet.Port.Type != intstr.Int {
-			return nil, fmt.Errorf("invalid prober config for %v, the port must be int type", path)
-		}
+	if LegacyLocalhostProbeDestination.Get() {
+		s.appProbersDestination = "localhost"
 	}
 
 	// Enable prometheus server if its configured and a sidecar
@@ -174,6 +181,44 @@ func NewServer(config Config) (*Server, error) {
 		}
 	}
 
+	if config.KubeAppProbers == "" {
+		return s, nil
+	}
+	if err := json.Unmarshal([]byte(config.KubeAppProbers), &s.appKubeProbers); err != nil {
+		return nil, fmt.Errorf("failed to decode app prober err = %v, json string = %v", err, config.KubeAppProbers)
+	}
+
+	s.appProbeClient = make(map[string]*http.Client, len(s.appKubeProbers))
+	// Validate the map key matching the regex pattern.
+	for path, prober := range s.appKubeProbers {
+		if !appProberPattern.Match([]byte(path)) {
+			return nil, fmt.Errorf(`invalid key, must be in form of regex pattern ^/app-health/[^\/]+/(livez|readyz)$`)
+		}
+		if prober.HTTPGet == nil {
+			return nil, fmt.Errorf(`invalid prober type, must be of type httpGet`)
+		}
+		if prober.HTTPGet.Port.Type != intstr.Int {
+			return nil, fmt.Errorf("invalid prober config for %v, the port must be int type", path)
+		}
+		localAddr := UpstreamLocalAddressIPv4
+		if config.IPv6 {
+			localAddr = UpstreamLocalAddressIPv6
+		}
+		d := &net.Dialer{
+			LocalAddr: localAddr,
+		}
+		// Construct a http client and cache it in order to reuse the connection.
+		s.appProbeClient[path] = &http.Client{
+			Timeout: time.Duration(prober.TimeoutSeconds) * time.Second,
+			// We skip the verification since kubelet skips the verification for HTTPS prober as well
+			// https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-probes/#configure-probes
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+				DialContext:     d.DialContext,
+			},
+		}
+	}
+
 	return s, nil
 }
 
@@ -187,7 +232,7 @@ func FormatProberURL(container string) (string, string, string) {
 
 // Run opens a the status port and begins accepting probes.
 func (s *Server) Run(ctx context.Context) {
-	log.Infof("Opening status port %d\n", s.statusPort)
+	log.Infof("Opening status port %d", s.statusPort)
 
 	mux := http.NewServeMux()
 
@@ -196,6 +241,13 @@ func (s *Server) Run(ctx context.Context) {
 	mux.HandleFunc(`/stats/prometheus`, s.handleStats)
 	mux.HandleFunc(quitPath, s.handleQuit)
 	mux.HandleFunc("/app-health/", s.handleAppProbe)
+
+	// Add the handler for pprof.
+	mux.HandleFunc("/debug/pprof/", s.handlePprofIndex)
+	mux.HandleFunc("/debug/pprof/cmdline", s.handlePprofCmdline)
+	mux.HandleFunc("/debug/pprof/profile", s.handlePprofProfile)
+	mux.HandleFunc("/debug/pprof/symbol", s.handlePprofSymbol)
+	mux.HandleFunc("/debug/pprof/trace", s.handlePprofTrace)
 
 	l, err := net.Listen("tcp", fmt.Sprintf(":%d", s.statusPort))
 	if err != nil {
@@ -214,7 +266,7 @@ func (s *Server) Run(ctx context.Context) {
 
 	go func() {
 		if err := http.Serve(l, mux); err != nil {
-			log.Errora(err)
+			log.Error(err)
 			select {
 			case <-ctx.Done():
 				// We are shutting down already, don't trigger SIGTERM
@@ -232,9 +284,53 @@ func (s *Server) Run(ctx context.Context) {
 	log.Info("Status server has successfully terminated")
 }
 
-func (s *Server) handleReadyProbe(w http.ResponseWriter, _ *http.Request) {
-	err := s.ready.Check()
+func (s *Server) handlePprofIndex(w http.ResponseWriter, r *http.Request) {
+	if !isRequestFromLocalhost(r) {
+		http.Error(w, "Only requests from localhost are allowed", http.StatusForbidden)
+		return
+	}
 
+	pprof.Index(w, r)
+}
+
+func (s *Server) handlePprofCmdline(w http.ResponseWriter, r *http.Request) {
+	if !isRequestFromLocalhost(r) {
+		http.Error(w, "Only requests from localhost are allowed", http.StatusForbidden)
+		return
+	}
+
+	pprof.Cmdline(w, r)
+}
+
+func (s *Server) handlePprofSymbol(w http.ResponseWriter, r *http.Request) {
+	if !isRequestFromLocalhost(r) {
+		http.Error(w, "Only requests from localhost are allowed", http.StatusForbidden)
+		return
+	}
+
+	pprof.Symbol(w, r)
+}
+
+func (s *Server) handlePprofProfile(w http.ResponseWriter, r *http.Request) {
+	if !isRequestFromLocalhost(r) {
+		http.Error(w, "Only requests from localhost are allowed", http.StatusForbidden)
+		return
+	}
+
+	pprof.Profile(w, r)
+}
+
+func (s *Server) handlePprofTrace(w http.ResponseWriter, r *http.Request) {
+	if !isRequestFromLocalhost(r) {
+		http.Error(w, "Only requests from localhost are allowed", http.StatusForbidden)
+		return
+	}
+
+	pprof.Trace(w, r)
+}
+
+func (s *Server) handleReadyProbe(w http.ResponseWriter, _ *http.Request) {
+	err := s.isReady()
 	s.mutex.Lock()
 	if err != nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -250,6 +346,15 @@ func (s *Server) handleReadyProbe(w http.ResponseWriter, _ *http.Request) {
 		s.lastProbeSuccessful = true
 	}
 	s.mutex.Unlock()
+}
+
+func (s *Server) isReady() error {
+	for _, p := range s.ready {
+		if err := p.Check(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func isRequestFromLocalhost(r *http.Request) bool {
@@ -275,38 +380,38 @@ type PrometheusScrapeConfiguration struct {
 // Note that we do not return any errors here. If we do, we will drop metrics. For example, the app may be having issues,
 // but we still want Envoy metrics. Instead, errors are tracked in the failed scrape metrics/logs.
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	scrapeTotals.Increment()
+	metrics.ScrapeTotals.Increment()
 	var envoy, application, agent []byte
 	var err error
 	// Gather all the metrics we will merge
 	if envoy, err = s.scrape(fmt.Sprintf("http://localhost:%d/stats/prometheus", s.envoyStatsPort), r.Header); err != nil {
 		log.Errorf("failed scraping envoy metrics: %v", err)
-		envoyScrapeErrors.Increment()
+		metrics.EnvoyScrapeErrors.Increment()
 	}
 	if s.prometheus != nil {
 		url := fmt.Sprintf("http://localhost:%s%s", s.prometheus.Port, s.prometheus.Path)
 		if application, err = s.scrape(url, r.Header); err != nil {
 			log.Errorf("failed scraping application metrics: %v", err)
-			appScrapeErrors.Increment()
+			metrics.AppScrapeErrors.Increment()
 		}
 	}
 	if agent, err = scrapeAgentMetrics(); err != nil {
 		log.Errorf("failed scraping agent metrics: %v", err)
-		agentScrapeErrors.Increment()
+		metrics.AgentScrapeErrors.Increment()
 	}
 
 	// Write out the metrics
 	if _, err := w.Write(envoy); err != nil {
 		log.Errorf("failed to write envoy metrics: %v", err)
-		envoyScrapeErrors.Increment()
+		metrics.EnvoyScrapeErrors.Increment()
 	}
 	if _, err := w.Write(application); err != nil {
 		log.Errorf("failed to write application metrics: %v", err)
-		appScrapeErrors.Increment()
+		metrics.AppScrapeErrors.Increment()
 	}
 	if _, err := w.Write(agent); err != nil {
 		log.Errorf("failed to write agent metrics: %v", err)
-		agentScrapeErrors.Increment()
+		metrics.AgentScrapeErrors.Increment()
 	}
 }
 
@@ -414,25 +519,18 @@ func (s *Server) handleAppProbe(w http.ResponseWriter, req *http.Request) {
 		_, _ = w.Write([]byte(fmt.Sprintf("app prober config does not exists for %v", path)))
 		return
 	}
+	// get the http client must exist because
+	httpClient := s.appProbeClient[path]
 
-	// Construct a request sent to the application.
-	httpClient := &http.Client{
-		Timeout: time.Duration(prober.TimeoutSeconds) * time.Second,
-		// We skip the verification since kubelet skips the verification for HTTPS prober as well
-		// https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-probes/#configure-probes
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-	}
 	proberPath := prober.HTTPGet.Path
 	if !strings.HasPrefix(proberPath, "/") {
 		proberPath = "/" + proberPath
 	}
 	var url string
-	if prober.HTTPGet.Scheme == corev1.URISchemeHTTPS {
-		url = fmt.Sprintf("https://localhost:%v%s", prober.HTTPGet.Port.IntValue(), proberPath)
+	if prober.HTTPGet.Scheme == apimirror.URISchemeHTTPS {
+		url = fmt.Sprintf("https://%s:%v%s", s.appProbersDestination, prober.HTTPGet.Port.IntValue(), proberPath)
 	} else {
-		url = fmt.Sprintf("http://localhost:%v%s", prober.HTTPGet.Port.IntValue(), proberPath)
+		url = fmt.Sprintf("http://%s:%v%s", s.appProbersDestination, prober.HTTPGet.Port.IntValue(), proberPath)
 	}
 	appReq, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -448,12 +546,19 @@ func (s *Server) handleAppProbe(w http.ResponseWriter, req *http.Request) {
 		appReq.Header[name] = newValues
 	}
 
-	for _, h := range prober.HTTPGet.HTTPHeaders {
-		if h.Name == "Host" || h.Name == ":authority" {
-			// Probe has specific host header override; honor it
-			appReq.Host = h.Value
-		} else {
-			appReq.Header.Add(h.Name, h.Value)
+	// If there are custom HTTPHeaders, it will override the forwarding header
+	if headers := prober.HTTPGet.HTTPHeaders; len(headers) != 0 {
+		for _, h := range headers {
+			delete(appReq.Header, h.Name)
+		}
+		for _, h := range headers {
+			if h.Name == "Host" || h.Name == ":authority" {
+				// Probe has specific host header override; honor it
+				appReq.Host = h.Value
+				appReq.Header.Set(h.Name, h.Value)
+			} else {
+				appReq.Header.Add(h.Name, h.Value)
+			}
 		}
 	}
 
@@ -478,7 +583,7 @@ func (s *Server) handleAppProbe(w http.ResponseWriter, req *http.Request) {
 func notifyExit() {
 	p, err := os.FindProcess(os.Getpid())
 	if err != nil {
-		log.Errora(err)
+		log.Error(err)
 	}
 	if err := p.Signal(syscall.SIGTERM); err != nil {
 		log.Errorf("failed to send SIGTERM to self: %v", err)

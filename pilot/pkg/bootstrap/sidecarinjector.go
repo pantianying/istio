@@ -15,30 +15,60 @@
 package bootstrap
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"istio.io/istio/pilot/pkg/features"
 	"istio.io/istio/pkg/kube/inject"
 	"istio.io/istio/pkg/webhooks"
+	"istio.io/pkg/env"
 	"istio.io/pkg/log"
 )
 
 const (
 	// Name of the webhook config in the config - no need to change it.
 	webhookName = "sidecar-injector.istio.io"
+	// defaultInjectorConfigMapName is the default name of the ConfigMap with the injection config
+	// The actual name can be different - use getInjectorConfigMapName
+	defaultInjectorConfigMapName = "istio-sidecar-injector"
 )
 
+var injectionEnabled = env.RegisterBoolVar("INJECT_ENABLED", true, "Enable mutating webhook handler.")
+
 func (s *Server) initSidecarInjector(args *PilotArgs) (*inject.Webhook, error) {
+	// currently the constant: "./var/lib/istio/inject"
 	injectPath := args.InjectionOptions.InjectionDirectory
-	if injectPath == "" {
-		log.Infof("Skipping sidecar injector, injection path is missing")
+	if injectPath == "" || !injectionEnabled.Get() {
+		log.Infof("Skipping sidecar injector, injection path is missing or disabled.")
 		return nil, nil
 	}
 
-	// If the injection path exists, we will set up injection
-	if _, err := os.Stat(filepath.Join(injectPath, "config")); os.IsNotExist(err) {
+	// If the injection config exists either locally or remotely, we will set up injection.
+	var watcher inject.Watcher
+	if _, err := os.Stat(filepath.Join(injectPath, "config")); !os.IsNotExist(err) {
+		configFile := filepath.Join(injectPath, "config")
+		valuesFile := filepath.Join(injectPath, "values")
+		watcher, err = inject.NewFileWatcher(configFile, valuesFile)
+		if err != nil {
+			return nil, err
+		}
+	} else if s.kubeClient != nil {
+		configMapName := getInjectorConfigMapName(args.Revision)
+		cms := s.kubeClient.CoreV1().ConfigMaps(args.Namespace)
+		if _, err := cms.Get(context.TODO(), configMapName, metav1.GetOptions{}); err != nil {
+			if errors.IsNotFound(err) {
+				log.Infof("Skipping sidecar injector, template not found")
+				return nil, nil
+			}
+			return nil, err
+		}
+		watcher = inject.NewConfigMapWatcher(s.kubeClient, args.Namespace, configMapName, "config", "values")
+	} else {
 		log.Infof("Skipping sidecar injector, template not found")
 		return nil, nil
 	}
@@ -46,13 +76,10 @@ func (s *Server) initSidecarInjector(args *PilotArgs) (*inject.Webhook, error) {
 	log.Info("initializing sidecar injector")
 
 	parameters := inject.WebhookParameters{
-		ConfigFile: filepath.Join(injectPath, "config"),
-		ValuesFile: filepath.Join(injectPath, "values"),
-		Env:        s.environment,
-		// Disable monitoring. The injection metrics will be picked up by Pilots metrics exporter already
-		MonitoringPort: -1,
-		Mux:            s.httpsMux,
-		Revision:       args.Revision,
+		Watcher:  watcher,
+		Env:      s.environment,
+		Mux:      s.httpsMux,
+		Revision: args.Revision,
 	}
 
 	wh, err := inject.NewWebhook(parameters)
@@ -65,17 +92,30 @@ func (s *Server) initSidecarInjector(args *PilotArgs) (*inject.Webhook, error) {
 	if features.InjectionWebhookConfigName.Get() != "" {
 		s.addStartFunc(func(stop <-chan struct{}) error {
 			// No leader election - different istiod revisions will patch their own cert.
-			caBundlePath := s.caBundlePath
-			if hasCustomTLSCerts(args.ServerOptions.TLSOptions) {
-				caBundlePath = args.ServerOptions.TLSOptions.CaCertFile
+			caBundle := s.istiodCertBundleWatcher.GetCABundle()
+			// TODO(hzxuzhonghu): this should be consistent with validating webhook,
+			// update webhook configuration by watching the cabundle
+			patcher, err := webhooks.NewWebhookCertPatcher(s.kubeClient, args.Revision, webhookName, caBundle)
+			if err != nil {
+				log.Errorf("failed to create webhook cert patcher: %v", err)
+				return nil
 			}
-			webhooks.PatchCertLoop(features.InjectionWebhookConfigName.Get(), webhookName, caBundlePath, s.kubeClient, stop)
+
+			patcher.Run(stop)
 			return nil
 		})
 	}
 	s.addStartFunc(func(stop <-chan struct{}) error {
-		go wh.Run(stop)
+		wh.Run(stop)
 		return nil
 	})
 	return wh, nil
+}
+
+func getInjectorConfigMapName(revision string) string {
+	name := defaultInjectorConfigMapName
+	if revision == "" || revision == "default" {
+		return name
+	}
+	return name + "-" + revision
 }

@@ -26,10 +26,10 @@ import (
 
 	meshconfig "istio.io/api/mesh/v1alpha1"
 	networking "istio.io/api/networking/v1alpha3"
-
 	"istio.io/istio/pilot/pkg/config/memory"
 	"istio.io/istio/pilot/pkg/model"
 	memregistry "istio.io/istio/pilot/pkg/serviceregistry/memory"
+	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/mesh"
 	"istio.io/istio/pkg/config/protocol"
 	"istio.io/istio/pkg/config/schema/collections"
@@ -180,42 +180,50 @@ func TestGetLocalityLbSetting(t *testing.T) {
 		dr       *networking.LocalityLoadBalancerSetting
 		expected *networking.LocalityLoadBalancerSetting
 	}{
-		{"all disabled",
+		{
+			"all disabled",
 			nil,
 			nil,
 			nil,
 		},
-		{"mesh only",
+		{
+			"mesh only",
 			&networking.LocalityLoadBalancerSetting{},
 			nil,
 			&networking.LocalityLoadBalancerSetting{},
 		},
-		{"dr only",
+		{
+			"dr only",
 			nil,
 			&networking.LocalityLoadBalancerSetting{},
 			&networking.LocalityLoadBalancerSetting{},
 		},
-		{"dr only override",
+		{
+			"dr only override",
 			nil,
 			&networking.LocalityLoadBalancerSetting{Enabled: &types.BoolValue{Value: true}},
 			&networking.LocalityLoadBalancerSetting{Enabled: &types.BoolValue{Value: true}},
 		},
-		{"both",
+		{
+			"both",
 			&networking.LocalityLoadBalancerSetting{},
 			&networking.LocalityLoadBalancerSetting{Failover: failover},
 			&networking.LocalityLoadBalancerSetting{Failover: failover},
 		},
-		{"mesh disabled",
+		{
+			"mesh disabled",
 			&networking.LocalityLoadBalancerSetting{Enabled: &types.BoolValue{Value: false}},
 			nil,
 			nil,
 		},
-		{"dr disabled",
+		{
+			"dr disabled",
 			&networking.LocalityLoadBalancerSetting{Enabled: &types.BoolValue{Value: true}},
 			&networking.LocalityLoadBalancerSetting{Enabled: &types.BoolValue{Value: false}},
 			nil,
 		},
-		{"dr enabled override mesh disabled",
+		{
+			"dr enabled override mesh disabled",
 			&networking.LocalityLoadBalancerSetting{Enabled: &types.BoolValue{Value: false}},
 			&networking.LocalityLoadBalancerSetting{Enabled: &types.BoolValue{Value: true}},
 			&networking.LocalityLoadBalancerSetting{Enabled: &types.BoolValue{Value: true}},
@@ -266,19 +274,22 @@ func buildEnvForClustersWithDistribute(distribute []*networking.LocalityLoadBala
 	}
 
 	env.PushContext = model.NewPushContext()
+	env.Init()
 	_ = env.PushContext.InitContext(env, nil, nil)
-	env.PushContext.SetDestinationRules([]model.Config{
-		{ConfigMeta: model.ConfigMeta{
-			GroupVersionKind: collections.IstioNetworkingV1Alpha3Destinationrules.Resource().GroupVersionKind(),
-			Name:             "acme",
-		},
+	env.PushContext.SetDestinationRules([]config.Config{
+		{
+			Meta: config.Meta{
+				GroupVersionKind: collections.IstioNetworkingV1Alpha3Destinationrules.Resource().GroupVersionKind(),
+				Name:             "acme",
+			},
 			Spec: &networking.DestinationRule{
 				Host: "test.example.org",
 				TrafficPolicy: &networking.TrafficPolicy{
 					OutlierDetection: &networking.OutlierDetection{},
 				},
 			},
-		}})
+		},
+	})
 
 	return env
 }
@@ -323,19 +334,22 @@ func buildEnvForClustersWithFailover() *model.Environment {
 	}
 
 	env.PushContext = model.NewPushContext()
+	env.Init()
 	_ = env.PushContext.InitContext(env, nil, nil)
-	env.PushContext.SetDestinationRules([]model.Config{
-		{ConfigMeta: model.ConfigMeta{
-			GroupVersionKind: collections.IstioNetworkingV1Alpha3Destinationrules.Resource().GroupVersionKind(),
-			Name:             "acme",
-		},
+	env.PushContext.SetDestinationRules([]config.Config{
+		{
+			Meta: config.Meta{
+				GroupVersionKind: collections.IstioNetworkingV1Alpha3Destinationrules.Resource().GroupVersionKind(),
+				Name:             "acme",
+			},
 			Spec: &networking.DestinationRule{
 				Host: "test.example.org",
 				TrafficPolicy: &networking.TrafficPolicy{
 					OutlierDetection: &networking.OutlierDetection{},
 				},
 			},
-		}})
+		},
+	})
 
 	return env
 }
@@ -398,7 +412,6 @@ func buildFakeCluster() *cluster.Cluster {
 			},
 		},
 	}
-
 }
 
 func buildSmallCluster() *cluster.Cluster {

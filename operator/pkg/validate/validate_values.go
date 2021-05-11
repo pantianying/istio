@@ -21,16 +21,14 @@ import (
 	"istio.io/istio/operator/pkg/util"
 )
 
-var (
-	// DefaultValuesValidations maps a data path to a validation function.
-	DefaultValuesValidations = map[string]ValidatorFunc{
-		"global.proxy.includeIPRanges":     validateIPRangesOrStar,
-		"global.proxy.excludeIPRanges":     validateIPRangesOrStar,
-		"global.proxy.includeInboundPorts": validateStringList(validatePortNumberString),
-		"global.proxy.excludeInboundPorts": validateStringList(validatePortNumberString),
-		"meshConfig":                       validateMeshConfig,
-	}
-)
+// DefaultValuesValidations maps a data path to a validation function.
+var DefaultValuesValidations = map[string]ValidatorFunc{
+	"global.proxy.includeIPRanges":     validateIPRangesOrStar,
+	"global.proxy.excludeIPRanges":     validateIPRangesOrStar,
+	"global.proxy.includeInboundPorts": validateStringList(validatePortNumberString),
+	"global.proxy.excludeInboundPorts": validateStringList(validatePortNumberString),
+	"meshConfig":                       validateMeshConfig,
+}
 
 // CheckValues validates the values in the given tree, which follows the Istio values.yaml schema.
 func CheckValues(root interface{}) util.Errors {
@@ -39,7 +37,7 @@ func CheckValues(root interface{}) util.Errors {
 		return util.Errors{err}
 	}
 	val := &v1alpha1.Values{}
-	if err := util.UnmarshalValuesWithJSONPB(string(vs), val, false); err != nil {
+	if err := util.UnmarshalWithJSONPB(string(vs), val, false); err != nil {
 		return util.Errors{err}
 	}
 	return ValuesValidate(DefaultValuesValidations, root, nil)

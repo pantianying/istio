@@ -27,8 +27,14 @@ const (
 	HTTPSHandlerReadyPath = "/httpsReady"
 )
 
+// initSSecureWebhookServer handles initialization for the HTTPS webhook server.
+// If https address is off the injection handlers will be registered on the main http endpoint, with
+// TLS handled by a proxy/gateway in front of Istiod.
 func (s *Server) initSecureWebhookServer(args *PilotArgs) {
-	if s.kubeClient == nil {
+	// create the https server for hosting the k8s injectionWebhook handlers.
+	if args.ServerOptions.HTTPSAddr == "" {
+		s.httpsMux = s.httpMux
+		log.Info("HTTPS port is disabled, multiplexing webhooks on the httpAddr ", args.ServerOptions.HTTPAddr)
 		return
 	}
 
@@ -40,6 +46,8 @@ func (s *Server) initSecureWebhookServer(args *PilotArgs) {
 		Handler: s.httpsMux,
 		TLSConfig: &tls.Config{
 			GetCertificate: s.getIstiodCertificate,
+			MinVersion:     tls.VersionTLS12,
+			CipherSuites:   args.ServerOptions.TLSOptions.CipherSuits,
 		},
 	}
 

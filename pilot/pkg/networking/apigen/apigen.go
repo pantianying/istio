@@ -17,17 +17,17 @@ package apigen
 import (
 	"strings"
 
+	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	gogotypes "github.com/gogo/protobuf/types"
 	golangany "github.com/golang/protobuf/ptypes/any"
 
-	"istio.io/istio/pilot/pkg/serviceregistry"
-	"istio.io/istio/pkg/config/schema/gvk"
-
 	mcp "istio.io/api/mcp/v1alpha1"
 	"istio.io/istio/pilot/pkg/model"
+	"istio.io/istio/pilot/pkg/serviceregistry"
 	"istio.io/istio/pilot/pkg/serviceregistry/serviceentry"
+	"istio.io/istio/pkg/config"
 	"istio.io/istio/pkg/config/schema/collections"
-	"istio.io/istio/pkg/config/schema/resource"
+	"istio.io/istio/pkg/config/schema/gvk"
 	"istio.io/pkg/log"
 )
 
@@ -44,6 +44,7 @@ import (
 //
 // TODO: we can also add a special marker in the header)
 type APIGenerator struct {
+	model.BaseGenerator
 }
 
 // TODO: take 'updates' into account, don't send pushes for resources that haven't changed
@@ -57,8 +58,8 @@ type APIGenerator struct {
 // This provides similar functionality with MCP and :8080/debug/configz.
 //
 // Names are based on the current resource naming in istiod stores.
-func (g *APIGenerator) Generate(proxy *model.Proxy, push *model.PushContext, w *model.WatchedResource, updates model.XdsUpdates) model.Resources {
-	resp := []*golangany.Any{}
+func (g *APIGenerator) Generate(proxy *model.Proxy, push *model.PushContext, w *model.WatchedResource, updates *model.PushRequest) (model.Resources, error) {
+	resp := model.Resources{}
 
 	// Note: this is the style used by MCP and its config. Pilot is using 'Group/Version/Kind' as the
 	// key, which is similar.
@@ -70,12 +71,12 @@ func (g *APIGenerator) Generate(proxy *model.Proxy, push *model.PushContext, w *
 	if len(kind) != 3 {
 		log.Warnf("ADS: Unknown watched resources %s", w.TypeUrl)
 		// Still return an empty response - to not break waiting code. It is fine to not know about some resource.
-		return resp
+		return resp, nil
 	}
 	// TODO: extra validation may be needed - at least logging that a resource
 	// of unknown type was requested. This should not be an error - maybe client asks
 	// for a valid CRD we just don't know about. An empty set indicates we have no such config.
-	rgvk := resource.GroupVersionKind{
+	rgvk := config.GroupVersionKind{
 		Group:   kind[0],
 		Version: kind[1],
 		Kind:    kind[2],
@@ -83,12 +84,15 @@ func (g *APIGenerator) Generate(proxy *model.Proxy, push *model.PushContext, w *
 	if w.TypeUrl == collections.IstioMeshV1Alpha1MeshConfig.Resource().GroupVersionKind().String() {
 		meshAny, err := gogotypes.MarshalAny(push.Mesh)
 		if err == nil {
-			resp = append(resp, &golangany.Any{
+			a := &golangany.Any{
 				TypeUrl: meshAny.TypeUrl,
 				Value:   meshAny.Value,
+			}
+			resp = append(resp, &discovery.Resource{
+				Resource: a,
 			})
 		}
-		return resp
+		return resp, nil
 	}
 
 	// TODO: what is the proper way to handle errors ?
@@ -99,7 +103,7 @@ func (g *APIGenerator) Generate(proxy *model.Proxy, push *model.PushContext, w *
 	cfg, err := push.IstioConfigStore.List(rgvk, "")
 	if err != nil {
 		log.Warnf("ADS: Error reading resource %s %v", w.TypeUrl, err)
-		return resp
+		return resp, nil
 	}
 	for _, c := range cfg {
 		// Right now model.Config is not a proto - until we change it, mcp.Resource.
@@ -107,17 +111,21 @@ func (g *APIGenerator) Generate(proxy *model.Proxy, push *model.PushContext, w *
 
 		b, err := configToResource(&c)
 		if err != nil {
-			log.Warna("Resource error ", err, " ", c.Namespace, "/", c.Name)
+			log.Warn("Resource error ", err, " ", c.Namespace, "/", c.Name)
 			continue
 		}
 		bany, err := gogotypes.MarshalAny(b)
 		if err == nil {
-			resp = append(resp, &golangany.Any{
+			a := &golangany.Any{
 				TypeUrl: bany.TypeUrl,
 				Value:   bany.Value,
+			}
+			resp = append(resp, &discovery.Resource{
+				Name:     c.Namespace + "/" + c.Name,
+				Resource: a,
 			})
 		} else {
-			log.Warna("Any ", err)
+			log.Warn("Any ", err)
 		}
 	}
 
@@ -135,32 +143,36 @@ func (g *APIGenerator) Generate(proxy *model.Proxy, push *model.PushContext, w *
 			c := serviceentry.ServiceToServiceEntry(s)
 			b, err := configToResource(c)
 			if err != nil {
-				log.Warna("Resource error ", err, " ", c.Namespace, "/", c.Name)
+				log.Warn("Resource error ", err, " ", c.Namespace, "/", c.Name)
 				continue
 			}
 			bany, err := gogotypes.MarshalAny(b)
 			if err == nil {
-				resp = append(resp, &golangany.Any{
+				a := &golangany.Any{
 					TypeUrl: bany.TypeUrl,
 					Value:   bany.Value,
+				}
+				resp = append(resp, &discovery.Resource{
+					Name:     c.Namespace + "/" + c.Name,
+					Resource: a,
 				})
 			} else {
-				log.Warna("Any ", err)
+				log.Warn("Any ", err)
 			}
 		}
 	}
 
-	return resp
+	return resp, nil
 }
 
 // Convert from model.Config, which has no associated proto, to MCP Resource proto.
 // TODO: define a proto matching Config - to avoid useless superficial conversions.
-func configToResource(c *model.Config) (*mcp.Resource, error) {
+func configToResource(c *config.Config) (*mcp.Resource, error) {
 	r := &mcp.Resource{}
 
 	// MCP, K8S and Istio configs use gogo configs
 	// On the wire it's the same as golang proto.
-	a, err := gogotypes.MarshalAny(c.Spec)
+	a, err := config.ToProtoGogo(c.Spec)
 	if err != nil {
 		return nil, err
 	}

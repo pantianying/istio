@@ -21,12 +21,10 @@ import (
 	"github.com/gogo/protobuf/types"
 
 	networking "istio.io/api/networking/v1alpha3"
-
-	"istio.io/istio/pilot/pkg/features"
+	"istio.io/istio/pkg/config"
 )
 
 func TestValidateChainingVirtualService(t *testing.T) {
-	features.EnableVirtualServiceDelegate = true
 	testCases := []struct {
 		name  string
 		in    proto.Message
@@ -57,7 +55,7 @@ func TestValidateChainingVirtualService(t *testing.T) {
 					},
 				}},
 			},
-			valid: false,
+			valid: true,
 		},
 		{
 			name: "root with delegate and destination in one route",
@@ -87,12 +85,13 @@ func TestValidateChainingVirtualService(t *testing.T) {
 			name: "delegate with delegate",
 			in: &networking.VirtualService{
 				Hosts: []string{},
-				Http: []*networking.HTTPRoute{{
-					Delegate: &networking.Delegate{
-						Name:      "test",
-						Namespace: "test",
+				Http: []*networking.HTTPRoute{
+					{
+						Delegate: &networking.Delegate{
+							Name:      "test",
+							Namespace: "test",
+						},
 					},
-				},
 				},
 			},
 			valid: false,
@@ -137,13 +136,13 @@ func TestValidateChainingVirtualService(t *testing.T) {
 					}},
 				}},
 			},
-			valid: false,
+			valid: true,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := ValidateVirtualService("", "", tc.in); (err == nil) != tc.valid {
+			if _, err := ValidateVirtualService(config.Config{Spec: tc.in}); (err == nil) != tc.valid {
 				t.Fatalf("got valid=%v but wanted valid=%v: %v", err == nil, tc.valid, err)
 			}
 		})
@@ -204,7 +203,8 @@ func TestValidateRootHTTPRoute(t *testing.T) {
 						"header": nil,
 					},
 				}},
-			}, valid: false},
+			}, valid: false,
+		},
 		{
 			name: "prefix header match", route: &networking.HTTPRoute{
 				Delegate: &networking.Delegate{
@@ -218,7 +218,8 @@ func TestValidateRootHTTPRoute(t *testing.T) {
 						},
 					},
 				}},
-			}, valid: true},
+			}, valid: true,
+		},
 		{
 			name: "exact header match", route: &networking.HTTPRoute{
 				Delegate: &networking.Delegate{
@@ -232,7 +233,8 @@ func TestValidateRootHTTPRoute(t *testing.T) {
 						},
 					},
 				}},
-			}, valid: true},
+			}, valid: true,
+		},
 		{name: "regex header match", route: &networking.HTTPRoute{
 			Delegate: &networking.Delegate{
 				Name:      "test",
@@ -292,7 +294,8 @@ func TestValidateRootHTTPRoute(t *testing.T) {
 						},
 					},
 				}},
-			}, valid: true},
+			}, valid: true,
+		},
 		{
 			name: "exact queryParams match", route: &networking.HTTPRoute{
 				Delegate: &networking.Delegate{
@@ -306,7 +309,8 @@ func TestValidateRootHTTPRoute(t *testing.T) {
 						},
 					},
 				}},
-			}, valid: true},
+			}, valid: true,
+		},
 		{name: "regex queryParams match", route: &networking.HTTPRoute{
 			Delegate: &networking.Delegate{
 				Name:      "test",
@@ -324,8 +328,8 @@ func TestValidateRootHTTPRoute(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := validateRootHTTPRoute(tc.route); (err == nil) != tc.valid {
-				t.Fatalf("got valid=%v but wanted valid=%v: %v", err == nil, tc.valid, err)
+			if err := validateHTTPRoute(tc.route, false); (err.Err == nil) != tc.valid {
+				t.Fatalf("got valid=%v but wanted valid=%v: %v", err.Err == nil, tc.valid, err)
 			}
 		})
 	}
@@ -554,8 +558,8 @@ func TestValidateDelegateHTTPRoute(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := validateDelegateHTTPRoute(tc.route); (err == nil) != tc.valid {
-				t.Fatalf("got valid=%v but wanted valid=%v: %v", err == nil, tc.valid, err)
+			if err := validateHTTPRoute(tc.route, true); (err.Err == nil) != tc.valid {
+				t.Fatalf("got valid=%v but wanted valid=%v: %v", err.Err == nil, tc.valid, err)
 			}
 		})
 	}

@@ -19,33 +19,18 @@ import (
 	"strconv"
 	"strings"
 
-	xdsapi "github.com/envoyproxy/go-control-plane/envoy/api/v2"
-	envoycore "github.com/envoyproxy/go-control-plane/envoy/api/v2/core"
-	envoy_api_v2_route "github.com/envoyproxy/go-control-plane/envoy/api/v2/route"
-	v2 "github.com/envoyproxy/go-control-plane/envoy/config/filter/network/http_connection_manager/v2"
-	envoy_config_listener_v2 "github.com/envoyproxy/go-control-plane/envoy/config/listener/v2"
-	"github.com/golang/protobuf/ptypes/any"
-
-	"istio.io/pkg/log"
+	cluster "github.com/envoyproxy/go-control-plane/envoy/config/cluster/v3"
+	core "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
+	listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
+	route "github.com/envoyproxy/go-control-plane/envoy/config/route/v3"
+	hcm "github.com/envoyproxy/go-control-plane/envoy/extensions/filters/network/http_connection_manager/v3"
+	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/networking/util"
-
+	v3 "istio.io/istio/pilot/pkg/xds/v3"
 	"istio.io/istio/pkg/config/host"
-)
-
-// To avoid a recoursive depenency to v2.
-const (
-	typePrefix = "type.googleapis.com/envoy.api.v2."
-
-	// Constants used for XDS
-
-	// ClusterType is used for cluster discovery. Typically first request received
-	ClusterType = typePrefix + "Cluster"
-	// ListenerType is sent after clusters and endpoints.
-	ListenerType = typePrefix + "Listener"
-	// RouteType is sent after listeners.
-	RouteType = typePrefix + "RouteConfiguration"
+	"istio.io/pkg/log"
 )
 
 // Support generation of 'ApiListener' LDS responses, used for native support of gRPC.
@@ -65,26 +50,28 @@ const (
 // this is used for the API-based LDS and generic messages.
 
 type GrpcConfigGenerator struct {
+	model.BaseGenerator
 }
 
-func (g *GrpcConfigGenerator) Generate(proxy *model.Proxy, push *model.PushContext, w *model.WatchedResource, updates model.XdsUpdates) model.Resources {
+func (g *GrpcConfigGenerator) Generate(proxy *model.Proxy, push *model.PushContext,
+	w *model.WatchedResource, updates *model.PushRequest) (model.Resources, error) {
 	switch w.TypeUrl {
-	case ListenerType:
-		return g.BuildListeners(proxy, push, w.ResourceNames)
-	case ClusterType:
-		return g.BuildClusters(proxy, push, w.ResourceNames)
-	case RouteType:
-		return g.BuildHTTPRoutes(proxy, push, w.ResourceNames)
+	case v3.ListenerType:
+		return g.BuildListeners(proxy, push, w.ResourceNames), nil
+	case v3.ClusterType:
+		return g.BuildClusters(proxy, push, w.ResourceNames), nil
+	case v3.RouteType:
+		return g.BuildHTTPRoutes(proxy, push, w.ResourceNames), nil
 	}
 
-	return nil
+	return nil, nil
 }
 
 // handleLDSApiType handles a LDS request, returning listeners of ApiListener type.
 // The request may include a list of resource names, using the full_hostname[:port] format to select only
 // specific services.
-func (g *GrpcConfigGenerator) BuildListeners(node *model.Proxy, push *model.PushContext, names []string) []*any.Any {
-	resp := []*any.Any{}
+func (g *GrpcConfigGenerator) BuildListeners(node *model.Proxy, push *model.PushContext, names []string) model.Resources {
+	resp := model.Resources{}
 
 	filter := map[string]bool{}
 	for _, name := range names {
@@ -108,36 +95,41 @@ func (g *GrpcConfigGenerator) BuildListeners(node *model.Proxy, push *model.Push
 			}
 			for _, p := range sv.Ports {
 				hp := net.JoinHostPort(shost, strconv.Itoa(p.Port))
-				ll := &xdsapi.Listener{
+				ll := &listener.Listener{
 					Name: hp,
 				}
 
-				ll.Address = &envoycore.Address{
-					Address: &envoycore.Address_SocketAddress{
-						SocketAddress: &envoycore.SocketAddress{
+				ll.Address = &core.Address{
+					Address: &core.Address_SocketAddress{
+						SocketAddress: &core.SocketAddress{
 							Address: sv.Address,
-							PortSpecifier: &envoycore.SocketAddress_PortValue{
+							PortSpecifier: &core.SocketAddress_PortValue{
 								PortValue: uint32(p.Port),
 							},
 						},
 					},
 				}
-				// TODO: for TCP listeners don't generate RDS, but some indication of cluster name.
-				ll.ApiListener = &envoy_config_listener_v2.ApiListener{
-					ApiListener: util.MessageToAny(&v2.HttpConnectionManager{
-						RouteSpecifier: &v2.HttpConnectionManager_Rds{
-							Rds: &v2.Rds{
-								ConfigSource: &envoycore.ConfigSource{
-									ConfigSourceSpecifier: &envoycore.ConfigSource_Ads{
-										Ads: &envoycore.AggregatedConfigSource{},
-									},
+				hcm := &hcm.HttpConnectionManager{
+					RouteSpecifier: &hcm.HttpConnectionManager_Rds{
+						Rds: &hcm.Rds{
+							ConfigSource: &core.ConfigSource{
+								ConfigSourceSpecifier: &core.ConfigSource_Ads{
+									Ads: &core.AggregatedConfigSource{},
 								},
-								RouteConfigName: hp,
 							},
+							RouteConfigName: hp,
 						},
-					}),
+					},
 				}
-				resp = append(resp, util.MessageToAny(ll))
+				hcmAny := util.MessageToAny(hcm)
+				// TODO: for TCP listeners don't generate RDS, but some indication of cluster name.
+				ll.ApiListener = &listener.ApiListener{
+					ApiListener: hcmAny,
+				}
+				resp = append(resp, &discovery.Resource{
+					Name:     hp,
+					Resource: util.MessageToAny(ll),
+				})
 			}
 		}
 	}
@@ -147,29 +139,32 @@ func (g *GrpcConfigGenerator) BuildListeners(node *model.Proxy, push *model.Push
 
 // Handle a gRPC CDS request, used with the 'ApiListener' style of requests.
 // The main difference is that the request includes Resources.
-func (g *GrpcConfigGenerator) BuildClusters(node *model.Proxy, push *model.PushContext, names []string) []*any.Any {
-	resp := []*any.Any{}
+func (g *GrpcConfigGenerator) BuildClusters(node *model.Proxy, push *model.PushContext, names []string) model.Resources {
+	resp := model.Resources{}
 	// gRPC doesn't currently support any of the APIs - returning just the expected EDS result.
 	// Since the code is relatively strict - we'll add info as needed.
 	for _, n := range names {
 		hn, portn, err := net.SplitHostPort(n)
 		if err != nil {
-			log.Warna("Failed to parse ", n, " ", err)
+			log.Warn("Failed to parse ", n, " ", err)
 			continue
 		}
-		rc := &xdsapi.Cluster{
+		rc := &cluster.Cluster{
 			Name:                 n,
-			ClusterDiscoveryType: &xdsapi.Cluster_Type{Type: xdsapi.Cluster_EDS},
-			EdsClusterConfig: &xdsapi.Cluster_EdsClusterConfig{
+			ClusterDiscoveryType: &cluster.Cluster_Type{Type: cluster.Cluster_EDS},
+			EdsClusterConfig: &cluster.Cluster_EdsClusterConfig{
 				ServiceName: "outbound|" + portn + "||" + hn,
-				EdsConfig: &envoycore.ConfigSource{
-					ConfigSourceSpecifier: &envoycore.ConfigSource_Ads{
-						Ads: &envoycore.AggregatedConfigSource{},
+				EdsConfig: &core.ConfigSource{
+					ConfigSourceSpecifier: &core.ConfigSource_Ads{
+						Ads: &core.AggregatedConfigSource{},
 					},
 				},
 			},
 		}
-		resp = append(resp, util.MessageToAny(rc))
+		resp = append(resp, &discovery.Resource{
+			Name:     n,
+			Resource: util.MessageToAny(rc),
+		})
 	}
 	return resp
 }
@@ -177,23 +172,20 @@ func (g *GrpcConfigGenerator) BuildClusters(node *model.Proxy, push *model.PushC
 // handleSplitRDS supports per-VIP routes, as used by GRPC.
 // This mode is indicated by using names containing full host:port instead of just port.
 // Returns true of the request is of this type.
-func (g *GrpcConfigGenerator) BuildHTTPRoutes(node *model.Proxy, push *model.PushContext, routeNames []string) []*any.Any {
-	resp := []*any.Any{}
+func (g *GrpcConfigGenerator) BuildHTTPRoutes(node *model.Proxy, push *model.PushContext, routeNames []string) model.Resources {
+	resp := model.Resources{}
 
 	// Currently this mode is only used by GRPC, to extract Cluster for the default
 	// route.
-	// Current GRPC is also expecting the default route to be prefix=="", while we generate "/"
-	// in normal response.
-	// TODO: add support for full route, make sure GRPC is fixed to support both
 	for _, n := range routeNames {
 		hn, portn, err := net.SplitHostPort(n)
 		if err != nil {
-			log.Warna("Failed to parse ", n, " ", err)
+			log.Warn("Failed to parse ", n, " ", err)
 			continue
 		}
 		port, err := strconv.Atoi(portn)
 		if err != nil {
-			log.Warna("Failed to parse port ", n, " ", err)
+			log.Warn("Failed to parse port ", n, " ", err)
 			continue
 		}
 		el := node.SidecarScope.GetEgressListenerForRDS(port, "")
@@ -204,21 +196,21 @@ func (g *GrpcConfigGenerator) BuildHTTPRoutes(node *model.Proxy, push *model.Pus
 			if s.Hostname.Matches(host.Name(hn)) {
 				// Only generate the required route for grpc. Will need to generate more
 				// as GRPC adds more features.
-				rc := &xdsapi.RouteConfiguration{
+				rc := &route.RouteConfiguration{
 					Name: n,
-					VirtualHosts: []*envoy_api_v2_route.VirtualHost{
+					VirtualHosts: []*route.VirtualHost{
 						{
 							Name:    hn,
 							Domains: []string{hn, n},
 
-							Routes: []*envoy_api_v2_route.Route{
+							Routes: []*route.Route{
 								{
-									Match: &envoy_api_v2_route.RouteMatch{
-										PathSpecifier: &envoy_api_v2_route.RouteMatch_Prefix{Prefix: ""},
+									Match: &route.RouteMatch{
+										PathSpecifier: &route.RouteMatch_Prefix{Prefix: ""},
 									},
-									Action: &envoy_api_v2_route.Route_Route{
-										Route: &envoy_api_v2_route.RouteAction{
-											ClusterSpecifier: &envoy_api_v2_route.RouteAction_Cluster{
+									Action: &route.Route_Route{
+										Route: &route.RouteAction{
+											ClusterSpecifier: &route.RouteAction_Cluster{
 												Cluster: n,
 											},
 										},
@@ -228,7 +220,10 @@ func (g *GrpcConfigGenerator) BuildHTTPRoutes(node *model.Proxy, push *model.Pus
 						},
 					},
 				}
-				resp = append(resp, util.MessageToAny(rc))
+				resp = append(resp, &discovery.Resource{
+					Name:     n,
+					Resource: util.MessageToAny(rc),
+				})
 			}
 		}
 	}

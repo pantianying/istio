@@ -23,7 +23,7 @@ var (
 
 	// NamespaceNotInjected defines a diag.MessageType for message "NamespaceNotInjected".
 	// Description: A namespace is not enabled for Istio injection.
-	NamespaceNotInjected = diag.NewMessageType(diag.Warning, "IST0102", "The namespace is not enabled for Istio injection. Run 'kubectl label namespace %s istio-injection=enabled' to enable it, or 'kubectl label namespace %s istio-injection=disabled' to explicitly mark it as not needing injection")
+	NamespaceNotInjected = diag.NewMessageType(diag.Info, "IST0102", "The namespace is not enabled for Istio injection. Run 'kubectl label namespace %s istio-injection=enabled' to enable it, or 'kubectl label namespace %s istio-injection=disabled' to explicitly mark it as not needing injection.")
 
 	// PodMissingProxy defines a diag.MessageType for message "PodMissingProxy".
 	// Description: A pod is missing the Istio proxy.
@@ -69,14 +69,6 @@ var (
 	// Description: A DestinationRule and Policy are in conflict with regards to mTLS.
 	MTLSPolicyConflict = diag.NewMessageType(diag.Error, "IST0113", "A DestinationRule and Policy are in conflict with regards to mTLS for host %s. The DestinationRule %q specifies that mTLS must be %t but the Policy object %q specifies %s.")
 
-	// PolicySpecifiesPortNameThatDoesntExist defines a diag.MessageType for message "PolicySpecifiesPortNameThatDoesntExist".
-	// Description: A Policy targets a port name that cannot be found.
-	PolicySpecifiesPortNameThatDoesntExist = diag.NewMessageType(diag.Warning, "IST0114", "Port name %s could not be found for host %s, which means the Policy won't be enforced.")
-
-	// DestinationRuleUsesMTLSForWorkloadWithoutSidecar defines a diag.MessageType for message "DestinationRuleUsesMTLSForWorkloadWithoutSidecar".
-	// Description: A DestinationRule uses mTLS for a workload that has no sidecar.
-	DestinationRuleUsesMTLSForWorkloadWithoutSidecar = diag.NewMessageType(diag.Error, "IST0115", "DestinationRule %s uses mTLS for workload %s that has no sidecar. Traffic from workloads with sidecars will fail.")
-
 	// DeploymentAssociatedToMultipleServices defines a diag.MessageType for message "DeploymentAssociatedToMultipleServices".
 	// Description: The resulting pods of a service mesh deployment can't be associated with multiple services using the same port but different protocols.
 	DeploymentAssociatedToMultipleServices = diag.NewMessageType(diag.Warning, "IST0116", "This deployment %s is associated with multiple services using port %d but different protocols: %v")
@@ -92,14 +84,6 @@ var (
 	// JwtFailureDueToInvalidServicePortPrefix defines a diag.MessageType for message "JwtFailureDueToInvalidServicePortPrefix".
 	// Description: Authentication policy with JWT targets Service with invalid port specification.
 	JwtFailureDueToInvalidServicePortPrefix = diag.NewMessageType(diag.Warning, "IST0119", "Authentication policy with JWT targets Service with invalid port specification (port: %d, name: %s, protocol: %s, targetPort: %s).")
-
-	// PolicyResourceIsDeprecated defines a diag.MessageType for message "PolicyResourceIsDeprecated".
-	// Description: The Policy resource is deprecated and will be removed in a future Istio release. Migrate to the PeerAuthentication resource.
-	PolicyResourceIsDeprecated = diag.NewMessageType(diag.Info, "IST0120", "The Policy resource is deprecated and will be removed in a future Istio release. Migrate to the PeerAuthentication resource.")
-
-	// MeshPolicyResourceIsDeprecated defines a diag.MessageType for message "MeshPolicyResourceIsDeprecated".
-	// Description: The MeshPolicy resource is deprecated and will be removed in a future Istio release. Migrate to the PeerAuthentication resource.
-	MeshPolicyResourceIsDeprecated = diag.NewMessageType(diag.Info, "IST0121", "The MeshPolicy resource is deprecated and will be removed in a future Istio release. Migrate to the PeerAuthentication resource.")
 
 	// InvalidRegexp defines a diag.MessageType for message "InvalidRegexp".
 	// Description: Invalid Regex
@@ -127,7 +111,71 @@ var (
 
 	// NoServerCertificateVerificationPortLevel defines a diag.MessageType for message "NoServerCertificateVerificationPortLevel".
 	// Description: No caCertificates are set in DestinationRule, this results in no verification of presented server certificate for traffic to a given port.
-	NoServerCertificateVerificationPortLevel = diag.NewMessageType(diag.Error, "IST0129", "DestinationRule %s in namespace %s has TLS mode set to %s but no caCertificates are set to validate server identity for host: %s at port %s")
+	NoServerCertificateVerificationPortLevel = diag.NewMessageType(diag.Warning, "IST0129", "DestinationRule %s in namespace %s has TLS mode set to %s but no caCertificates are set to validate server identity for host: %s at port %s")
+
+	// VirtualServiceUnreachableRule defines a diag.MessageType for message "VirtualServiceUnreachableRule".
+	// Description: A VirtualService rule will never be used because a previous rule uses the same match.
+	VirtualServiceUnreachableRule = diag.NewMessageType(diag.Warning, "IST0130", "VirtualService rule %v not used (%s).")
+
+	// VirtualServiceIneffectiveMatch defines a diag.MessageType for message "VirtualServiceIneffectiveMatch".
+	// Description: A VirtualService rule match duplicates a match in a previous rule.
+	VirtualServiceIneffectiveMatch = diag.NewMessageType(diag.Info, "IST0131", "VirtualService rule %v match %v is not used (duplicates a match in rule %v).")
+
+	// VirtualServiceHostNotFoundInGateway defines a diag.MessageType for message "VirtualServiceHostNotFoundInGateway".
+	// Description: Host defined in VirtualService not found in Gateway.
+	VirtualServiceHostNotFoundInGateway = diag.NewMessageType(diag.Warning, "IST0132", "one or more host %v defined in VirtualService %s not found in Gateway %s.")
+
+	// SchemaWarning defines a diag.MessageType for message "SchemaWarning".
+	// Description: The resource has a schema validation warning.
+	SchemaWarning = diag.NewMessageType(diag.Warning, "IST0133", "Schema validation warning: %v")
+
+	// ServiceEntryAddressesRequired defines a diag.MessageType for message "ServiceEntryAddressesRequired".
+	// Description: Virtual IP addresses are required for ports serving TCP (or unset) protocol
+	ServiceEntryAddressesRequired = diag.NewMessageType(diag.Warning, "IST0134", "ServiceEntry addresses are required for this protocol.")
+
+	// DeprecatedAnnotation defines a diag.MessageType for message "DeprecatedAnnotation".
+	// Description: A resource is using a deprecated Istio annotation.
+	DeprecatedAnnotation = diag.NewMessageType(diag.Info, "IST0135", "Annotation %q has been deprecated and may not work in future Istio versions.")
+
+	// AlphaAnnotation defines a diag.MessageType for message "AlphaAnnotation".
+	// Description: An Istio annotation may not be suitable for production.
+	AlphaAnnotation = diag.NewMessageType(diag.Info, "IST0136", "Annotation %q is part of an alpha-phase feature and may be incompletely supported.")
+
+	// DeploymentConflictingPorts defines a diag.MessageType for message "DeploymentConflictingPorts".
+	// Description: Two services selecting the same workload with the same targetPort MUST refer to the same port.
+	DeploymentConflictingPorts = diag.NewMessageType(diag.Warning, "IST0137", "This deployment %s is associated with multiple services %v using targetPort %q but different ports: %v.")
+
+	// GatewayDuplicateCertificate defines a diag.MessageType for message "GatewayDuplicateCertificate".
+	// Description: Duplicate certificate in multiple gateways may cause 404s if clients re-use HTTP2 connections.
+	GatewayDuplicateCertificate = diag.NewMessageType(diag.Warning, "IST0138", "Duplicate certificate in multiple gateways %v may cause 404s if clients re-use HTTP2 connections.")
+
+	// InvalidWebhook defines a diag.MessageType for message "InvalidWebhook".
+	// Description: Webhook is invalid or references a control plane service that does not exist.
+	InvalidWebhook = diag.NewMessageType(diag.Error, "IST0139", "%v")
+
+	// IngressRouteRulesNotAffected defines a diag.MessageType for message "IngressRouteRulesNotAffected".
+	// Description: Route rules have no effect on ingress gateway requests
+	IngressRouteRulesNotAffected = diag.NewMessageType(diag.Warning, "IST0140", "Subset in virtual service %s has no effect on ingress gateway %s requests")
+
+	// InsufficientPermissions defines a diag.MessageType for message "InsufficientPermissions".
+	// Description: Required permissions to install Istio are missing.
+	InsufficientPermissions = diag.NewMessageType(diag.Error, "IST0141", "Missing required permission to create resource %v (%v)")
+
+	// UnsupportedKubernetesVersion defines a diag.MessageType for message "UnsupportedKubernetesVersion".
+	// Description: The Kubernetes version is not supported
+	UnsupportedKubernetesVersion = diag.NewMessageType(diag.Error, "IST0142", "The Kubernetes Version %q is lower than the minimum version: %v")
+
+	// LocalhostListener defines a diag.MessageType for message "LocalhostListener".
+	// Description: A port exposed in a Service is bound to a localhost address
+	LocalhostListener = diag.NewMessageType(diag.Error, "IST0143", "Port %v is exposed in a Service but listens on localhost. It will not be exposed to other pods.")
+
+	// InvalidApplicationUID defines a diag.MessageType for message "InvalidApplicationUID".
+	// Description: Application pods should not run as user ID (UID) 1337
+	InvalidApplicationUID = diag.NewMessageType(diag.Warning, "IST0144", "User ID (UID) 1337 is reserved for the sidecar proxy.")
+
+	// ConflictingGateways defines a diag.MessageType for message "ConflictingGateways".
+	// Description: Gateway should not have the same selector, port and matched hosts of server
+	ConflictingGateways = diag.NewMessageType(diag.Error, "IST0145", "Conflict with gateways %s (workload selector %s, port %s, hosts %v).")
 )
 
 // All returns a list of all known message types.
@@ -148,14 +196,10 @@ func All() []*diag.MessageType {
 		MultipleSidecarsWithoutWorkloadSelectors,
 		VirtualServiceDestinationPortSelectorRequired,
 		MTLSPolicyConflict,
-		PolicySpecifiesPortNameThatDoesntExist,
-		DestinationRuleUsesMTLSForWorkloadWithoutSidecar,
 		DeploymentAssociatedToMultipleServices,
 		DeploymentRequiresServiceAssociated,
 		PortNameIsNotUnderNamingConvention,
 		JwtFailureDueToInvalidServicePortPrefix,
-		PolicyResourceIsDeprecated,
-		MeshPolicyResourceIsDeprecated,
 		InvalidRegexp,
 		NamespaceMultipleInjectionLabels,
 		InvalidAnnotation,
@@ -163,6 +207,22 @@ func All() []*diag.MessageType {
 		NoMatchingWorkloadsFound,
 		NoServerCertificateVerificationDestinationLevel,
 		NoServerCertificateVerificationPortLevel,
+		VirtualServiceUnreachableRule,
+		VirtualServiceIneffectiveMatch,
+		VirtualServiceHostNotFoundInGateway,
+		SchemaWarning,
+		ServiceEntryAddressesRequired,
+		DeprecatedAnnotation,
+		AlphaAnnotation,
+		DeploymentConflictingPorts,
+		GatewayDuplicateCertificate,
+		InvalidWebhook,
+		IngressRouteRulesNotAffected,
+		InsufficientPermissions,
+		UnsupportedKubernetesVersion,
+		LocalhostListener,
+		InvalidApplicationUID,
+		ConflictingGateways,
 	}
 }
 
@@ -314,26 +374,6 @@ func NewMTLSPolicyConflict(r *resource.Instance, host string, destinationRuleNam
 	)
 }
 
-// NewPolicySpecifiesPortNameThatDoesntExist returns a new diag.Message based on PolicySpecifiesPortNameThatDoesntExist.
-func NewPolicySpecifiesPortNameThatDoesntExist(r *resource.Instance, portName string, host string) diag.Message {
-	return diag.NewMessage(
-		PolicySpecifiesPortNameThatDoesntExist,
-		r,
-		portName,
-		host,
-	)
-}
-
-// NewDestinationRuleUsesMTLSForWorkloadWithoutSidecar returns a new diag.Message based on DestinationRuleUsesMTLSForWorkloadWithoutSidecar.
-func NewDestinationRuleUsesMTLSForWorkloadWithoutSidecar(r *resource.Instance, destinationRuleName string, host string) diag.Message {
-	return diag.NewMessage(
-		DestinationRuleUsesMTLSForWorkloadWithoutSidecar,
-		r,
-		destinationRuleName,
-		host,
-	)
-}
-
 // NewDeploymentAssociatedToMultipleServices returns a new diag.Message based on DeploymentAssociatedToMultipleServices.
 func NewDeploymentAssociatedToMultipleServices(r *resource.Instance, deployment string, port int32, services []string) diag.Message {
 	return diag.NewMessage(
@@ -373,22 +413,6 @@ func NewJwtFailureDueToInvalidServicePortPrefix(r *resource.Instance, port int, 
 		portName,
 		protocol,
 		targetPort,
-	)
-}
-
-// NewPolicyResourceIsDeprecated returns a new diag.Message based on PolicyResourceIsDeprecated.
-func NewPolicyResourceIsDeprecated(r *resource.Instance) diag.Message {
-	return diag.NewMessage(
-		PolicyResourceIsDeprecated,
-		r,
-	)
-}
-
-// NewMeshPolicyResourceIsDeprecated returns a new diag.Message based on MeshPolicyResourceIsDeprecated.
-func NewMeshPolicyResourceIsDeprecated(r *resource.Instance) diag.Message {
-	return diag.NewMessage(
-		MeshPolicyResourceIsDeprecated,
-		r,
 	)
 }
 
@@ -464,5 +488,161 @@ func NewNoServerCertificateVerificationPortLevel(r *resource.Instance, destinati
 		mode,
 		host,
 		port,
+	)
+}
+
+// NewVirtualServiceUnreachableRule returns a new diag.Message based on VirtualServiceUnreachableRule.
+func NewVirtualServiceUnreachableRule(r *resource.Instance, ruleno string, reason string) diag.Message {
+	return diag.NewMessage(
+		VirtualServiceUnreachableRule,
+		r,
+		ruleno,
+		reason,
+	)
+}
+
+// NewVirtualServiceIneffectiveMatch returns a new diag.Message based on VirtualServiceIneffectiveMatch.
+func NewVirtualServiceIneffectiveMatch(r *resource.Instance, ruleno string, matchno string, dupno string) diag.Message {
+	return diag.NewMessage(
+		VirtualServiceIneffectiveMatch,
+		r,
+		ruleno,
+		matchno,
+		dupno,
+	)
+}
+
+// NewVirtualServiceHostNotFoundInGateway returns a new diag.Message based on VirtualServiceHostNotFoundInGateway.
+func NewVirtualServiceHostNotFoundInGateway(r *resource.Instance, host []string, virtualservice string, gateway string) diag.Message {
+	return diag.NewMessage(
+		VirtualServiceHostNotFoundInGateway,
+		r,
+		host,
+		virtualservice,
+		gateway,
+	)
+}
+
+// NewSchemaWarning returns a new diag.Message based on SchemaWarning.
+func NewSchemaWarning(r *resource.Instance, err error) diag.Message {
+	return diag.NewMessage(
+		SchemaWarning,
+		r,
+		err,
+	)
+}
+
+// NewServiceEntryAddressesRequired returns a new diag.Message based on ServiceEntryAddressesRequired.
+func NewServiceEntryAddressesRequired(r *resource.Instance) diag.Message {
+	return diag.NewMessage(
+		ServiceEntryAddressesRequired,
+		r,
+	)
+}
+
+// NewDeprecatedAnnotation returns a new diag.Message based on DeprecatedAnnotation.
+func NewDeprecatedAnnotation(r *resource.Instance, annotation string) diag.Message {
+	return diag.NewMessage(
+		DeprecatedAnnotation,
+		r,
+		annotation,
+	)
+}
+
+// NewAlphaAnnotation returns a new diag.Message based on AlphaAnnotation.
+func NewAlphaAnnotation(r *resource.Instance, annotation string) diag.Message {
+	return diag.NewMessage(
+		AlphaAnnotation,
+		r,
+		annotation,
+	)
+}
+
+// NewDeploymentConflictingPorts returns a new diag.Message based on DeploymentConflictingPorts.
+func NewDeploymentConflictingPorts(r *resource.Instance, deployment string, services []string, targetPort string, ports []int32) diag.Message {
+	return diag.NewMessage(
+		DeploymentConflictingPorts,
+		r,
+		deployment,
+		services,
+		targetPort,
+		ports,
+	)
+}
+
+// NewGatewayDuplicateCertificate returns a new diag.Message based on GatewayDuplicateCertificate.
+func NewGatewayDuplicateCertificate(r *resource.Instance, gateways []string) diag.Message {
+	return diag.NewMessage(
+		GatewayDuplicateCertificate,
+		r,
+		gateways,
+	)
+}
+
+// NewInvalidWebhook returns a new diag.Message based on InvalidWebhook.
+func NewInvalidWebhook(r *resource.Instance, error string) diag.Message {
+	return diag.NewMessage(
+		InvalidWebhook,
+		r,
+		error,
+	)
+}
+
+// NewIngressRouteRulesNotAffected returns a new diag.Message based on IngressRouteRulesNotAffected.
+func NewIngressRouteRulesNotAffected(r *resource.Instance, virtualservicesubset string, virtualservice string) diag.Message {
+	return diag.NewMessage(
+		IngressRouteRulesNotAffected,
+		r,
+		virtualservicesubset,
+		virtualservice,
+	)
+}
+
+// NewInsufficientPermissions returns a new diag.Message based on InsufficientPermissions.
+func NewInsufficientPermissions(r *resource.Instance, resource string, error string) diag.Message {
+	return diag.NewMessage(
+		InsufficientPermissions,
+		r,
+		resource,
+		error,
+	)
+}
+
+// NewUnsupportedKubernetesVersion returns a new diag.Message based on UnsupportedKubernetesVersion.
+func NewUnsupportedKubernetesVersion(r *resource.Instance, version string, minimumVersion string) diag.Message {
+	return diag.NewMessage(
+		UnsupportedKubernetesVersion,
+		r,
+		version,
+		minimumVersion,
+	)
+}
+
+// NewLocalhostListener returns a new diag.Message based on LocalhostListener.
+func NewLocalhostListener(r *resource.Instance, port string) diag.Message {
+	return diag.NewMessage(
+		LocalhostListener,
+		r,
+		port,
+	)
+}
+
+// NewInvalidApplicationUID returns a new diag.Message based on InvalidApplicationUID.
+func NewInvalidApplicationUID(r *resource.Instance) diag.Message {
+	return diag.NewMessage(
+		InvalidApplicationUID,
+		r,
+	)
+}
+
+// NewConflictingGateways returns a new diag.Message based on ConflictingGateways.
+func NewConflictingGateways(r *resource.Instance, gateway string, selector string, portnumber string, hosts string) diag.Message {
+	return diag.NewMessage(
+		ConflictingGateways,
+		r,
+		gateway,
+		selector,
+		portnumber,
+		hosts,
 	)
 }

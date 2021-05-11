@@ -25,7 +25,7 @@ docker: docker.all
 
 DOCKER_TARGETS ?= docker.pilot docker.proxyv2 docker.app docker.app_sidecar_ubuntu_xenial \
 docker.app_sidecar_ubuntu_bionic docker.app_sidecar_ubuntu_focal docker.app_sidecar_debian_9 \
-docker.app_sidecar_debian_10 docker.app_sidecar_centos_8  \
+docker.app_sidecar_debian_10 docker.app_sidecar_centos_8 docker.app_sidecar_centos_7 \
 docker.istioctl docker.operator docker.install-cni
 
 # Echo docker directory and the template to pass image name and version to for VM testing
@@ -53,12 +53,13 @@ $(foreach FILE,$(DOCKER_FILES_FROM_ISTIO_OUT_LINUX), \
 $(ISTIO_DOCKER)/certs:
 	mkdir -p $(ISTIO_DOCKER)
 	cp -a tests/testdata/certs $(ISTIO_DOCKER)/.
+	chmod -R o+r $(ISTIO_DOCKER)/certs
 
 # tell make which files are copied from the source tree and generate rules to copy them to the proper location:
 # TODO(sdake)                      $(NODE_AGENT_TEST_FILES) $(GRAFANA_FILES)
-DOCKER_FILES_FROM_SOURCE:=tests/testdata/certs/cert.crt tests/testdata/certs/cert.key tests/testdata/certs/cacert.pem
+DOCKER_FILES_FROM_SOURCE:=tests/testdata/certs/cert.crt tests/testdata/certs/cert.key
 $(foreach FILE,$(DOCKER_FILES_FROM_SOURCE), \
-        $(eval $(ISTIO_DOCKER)/$(notdir $(FILE)): $(FILE) | $(ISTIO_DOCKER); cp $(FILE) $$(@D)))
+        $(eval $(ISTIO_DOCKER)/$(notdir $(FILE)): $(FILE) | $(ISTIO_DOCKER); cp -p $(FILE) $$(@D)))
 
 # BUILD_PRE tells $(DOCKER_RULE) to run the command specified before executing a docker build
 # BUILD_ARGS tells  $(DOCKER_RULE) to execute a docker build with the specified commands
@@ -83,24 +84,24 @@ $(ISTIO_ENVOY_LINUX_RELEASE_DIR)/metadata-exchange-filter.wasm: init
 $(ISTIO_ENVOY_LINUX_RELEASE_DIR)/metadata-exchange-filter.compiled.wasm: init
 
 # Default proxy image.
-docker.proxyv2: BUILD_PRE=&& chmod 755 ${SIDECAR} pilot-agent
+docker.proxyv2: BUILD_PRE=&& chmod 755 ${SIDECAR} pilot-agent && chmod 644 envoy_bootstrap.json gcp_envoy_bootstrap.json
 docker.proxyv2: BUILD_ARGS=--build-arg proxy_version=istio-proxy:${PROXY_REPO_SHA} --build-arg istio_version=${VERSION} --build-arg BASE_VERSION=${BASE_VERSION} --build-arg SIDECAR=${SIDECAR}
 docker.proxyv2: ${ISTIO_ENVOY_BOOTSTRAP_CONFIG_DIR}/envoy_bootstrap.json
 docker.proxyv2: ${ISTIO_ENVOY_BOOTSTRAP_CONFIG_DIR}/gcp_envoy_bootstrap.json
 docker.proxyv2: $(ISTIO_ENVOY_LINUX_RELEASE_DIR)/${SIDECAR}
 docker.proxyv2: $(ISTIO_OUT_LINUX)/pilot-agent
 docker.proxyv2: pilot/docker/Dockerfile.proxyv2
-docker.proxyv2: pilot/docker/envoy_policy.yaml.tmpl
 docker.proxyv2: $(ISTIO_ENVOY_LINUX_RELEASE_DIR)/stats-filter.wasm
 docker.proxyv2: $(ISTIO_ENVOY_LINUX_RELEASE_DIR)/stats-filter.compiled.wasm
 docker.proxyv2: $(ISTIO_ENVOY_LINUX_RELEASE_DIR)/metadata-exchange-filter.wasm
 docker.proxyv2: $(ISTIO_ENVOY_LINUX_RELEASE_DIR)/metadata-exchange-filter.compiled.wasm
 	$(DOCKER_RULE)
 
-docker.pilot: BUILD_PRE=&& chmod 755 pilot-discovery cacert.pem
+docker.pilot: BUILD_PRE=&& chmod 755 pilot-discovery && chmod 644 envoy_bootstrap.json gcp_envoy_bootstrap.json
 docker.pilot: BUILD_ARGS=--build-arg BASE_VERSION=${BASE_VERSION}
+docker.pilot: ${ISTIO_ENVOY_BOOTSTRAP_CONFIG_DIR}/envoy_bootstrap.json
+docker.pilot: ${ISTIO_ENVOY_BOOTSTRAP_CONFIG_DIR}/gcp_envoy_bootstrap.json
 docker.pilot: $(ISTIO_OUT_LINUX)/pilot-discovery
-docker.pilot: tests/testdata/certs/cacert.pem
 docker.pilot: pilot/docker/Dockerfile.pilot
 	$(DOCKER_RULE)
 
@@ -114,7 +115,7 @@ docker.app: $(ISTIO_DOCKER)/certs
 	$(DOCKER_RULE)
 
 # Test application bundled with the sidecar with ubuntu:xenial (for non-k8s).
-docker.app_sidecar_ubuntu_xenial: BUILD_ARGS=--build-arg VM_IMAGE_NAME=ubuntu --build-arg VM_IMAGE_VERSION=xenial
+docker.app_sidecar_ubuntu_xenial: BUILD_ARGS=--build-arg VM_IMAGE_NAME=ubuntu --build-arg VM_IMAGE_VERSION=xenial --build-arg BASE_VERSION=${BASE_VERSION}
 docker.app_sidecar_ubuntu_xenial: tools/packaging/common/envoy_bootstrap.json
 docker.app_sidecar_ubuntu_xenial: $(ISTIO_OUT_LINUX)/release/istio-sidecar.deb
 docker.app_sidecar_ubuntu_xenial: $(ISTIO_DOCKER)/certs
@@ -125,7 +126,7 @@ docker.app_sidecar_ubuntu_xenial: $(ISTIO_OUT_LINUX)/server
 	$(DOCKER_RULE)
 
 # Test application bundled with the sidecar with ubuntu:bionic (for non-k8s).
-docker.app_sidecar_ubuntu_bionic: BUILD_ARGS=--build-arg VM_IMAGE_NAME=ubuntu --build-arg VM_IMAGE_VERSION=bionic
+docker.app_sidecar_ubuntu_bionic: BUILD_ARGS=--build-arg VM_IMAGE_NAME=ubuntu --build-arg VM_IMAGE_VERSION=bionic --build-arg BASE_VERSION=${BASE_VERSION}
 docker.app_sidecar_ubuntu_bionic: tools/packaging/common/envoy_bootstrap.json
 docker.app_sidecar_ubuntu_bionic: $(ISTIO_OUT_LINUX)/release/istio-sidecar.deb
 docker.app_sidecar_ubuntu_bionic: $(ISTIO_DOCKER)/certs
@@ -136,7 +137,7 @@ docker.app_sidecar_ubuntu_bionic: $(ISTIO_OUT_LINUX)/server
 	$(DOCKER_RULE)
 
 # Test application bundled with the sidecar with ubuntu:focal (for non-k8s).
-docker.app_sidecar_ubuntu_focal: BUILD_ARGS=--build-arg VM_IMAGE_NAME=ubuntu --build-arg VM_IMAGE_VERSION=focal
+docker.app_sidecar_ubuntu_focal: BUILD_ARGS=--build-arg VM_IMAGE_NAME=ubuntu --build-arg VM_IMAGE_VERSION=focal --build-arg BASE_VERSION=${BASE_VERSION}
 docker.app_sidecar_ubuntu_focal: tools/packaging/common/envoy_bootstrap.json
 docker.app_sidecar_ubuntu_focal: $(ISTIO_OUT_LINUX)/release/istio-sidecar.deb
 docker.app_sidecar_ubuntu_focal: $(ISTIO_DOCKER)/certs
@@ -147,7 +148,7 @@ docker.app_sidecar_ubuntu_focal: $(ISTIO_OUT_LINUX)/server
 	$(DOCKER_RULE)
 
 # Test application bundled with the sidecar with debian 9 (for non-k8s).
-docker.app_sidecar_debian_9: BUILD_ARGS=--build-arg VM_IMAGE_NAME=debian --build-arg VM_IMAGE_VERSION=9
+docker.app_sidecar_debian_9: BUILD_ARGS=--build-arg VM_IMAGE_NAME=debian --build-arg VM_IMAGE_VERSION=9 --build-arg BASE_VERSION=${BASE_VERSION}
 docker.app_sidecar_debian_9: tools/packaging/common/envoy_bootstrap.json
 docker.app_sidecar_debian_9: $(ISTIO_OUT_LINUX)/release/istio-sidecar.deb
 docker.app_sidecar_debian_9: $(ISTIO_DOCKER)/certs
@@ -158,7 +159,7 @@ docker.app_sidecar_debian_9: $(ISTIO_OUT_LINUX)/server
 	$(DOCKER_RULE)
 
 # Test application bundled with the sidecar with debian 10 (for non-k8s).
-docker.app_sidecar_debian_10: BUILD_ARGS=--build-arg VM_IMAGE_NAME=debian --build-arg VM_IMAGE_VERSION=10
+docker.app_sidecar_debian_10: BUILD_ARGS=--build-arg VM_IMAGE_NAME=debian --build-arg VM_IMAGE_VERSION=10 --build-arg BASE_VERSION=${BASE_VERSION}
 docker.app_sidecar_debian_10: tools/packaging/common/envoy_bootstrap.json
 docker.app_sidecar_debian_10: $(ISTIO_OUT_LINUX)/release/istio-sidecar.deb
 docker.app_sidecar_debian_10: $(ISTIO_DOCKER)/certs
@@ -169,7 +170,7 @@ docker.app_sidecar_debian_10: $(ISTIO_OUT_LINUX)/server
 	$(DOCKER_RULE)
 
 # Test application bundled with the sidecar (for non-k8s).
-docker.app_sidecar_centos_8: BUILD_ARGS=--build-arg BASE_VERSION=${BASE_VERSION}
+docker.app_sidecar_centos_8: BUILD_ARGS=--build-arg BASE_VERSION=${BASE_VERSION} --build-arg BASE_VERSION=${BASE_VERSION}
 docker.app_sidecar_centos_8: tools/packaging/common/envoy_bootstrap.json
 docker.app_sidecar_centos_8: $(ISTIO_OUT_LINUX)/release/istio-sidecar.rpm
 docker.app_sidecar_centos_8: $(ISTIO_DOCKER)/certs
@@ -179,12 +180,23 @@ docker.app_sidecar_centos_8: $(ISTIO_OUT_LINUX)/server
 docker.app_sidecar_centos_8: pkg/test/echo/docker/Dockerfile.app_sidecar_centos_8
 	$(DOCKER_RULE)
 
+# Test application bundled with the sidecar (for non-k8s).
+docker.app_sidecar_centos_7: BUILD_ARGS=--build-arg BASE_VERSION=${BASE_VERSION}
+docker.app_sidecar_centos_7: tools/packaging/common/envoy_bootstrap.json
+docker.app_sidecar_centos_7: $(ISTIO_OUT_LINUX)/release/istio-sidecar-centos-7.rpm
+docker.app_sidecar_centos_7: $(ISTIO_DOCKER)/certs
+docker.app_sidecar_centos_7: pkg/test/echo/docker/echo-start.sh
+docker.app_sidecar_centos_7: $(ISTIO_OUT_LINUX)/client
+docker.app_sidecar_centos_7: $(ISTIO_OUT_LINUX)/server
+docker.app_sidecar_centos_7: pkg/test/echo/docker/Dockerfile.app_sidecar_centos_7
+	$(DOCKER_RULE)
+
 docker.istioctl: BUILD_ARGS=--build-arg BASE_VERSION=${BASE_VERSION}
 docker.istioctl: istioctl/docker/Dockerfile.istioctl
 docker.istioctl: $(ISTIO_OUT_LINUX)/istioctl
 	$(DOCKER_RULE)
 
-docker.operator: manifests/
+docker.operator: manifests
 docker.operator: BUILD_ARGS=--build-arg BASE_VERSION=${BASE_VERSION}
 docker.operator: operator/docker/Dockerfile.operator
 docker.operator: $(ISTIO_OUT_LINUX)/operator
@@ -196,10 +208,14 @@ docker.install-cni: $(ISTIO_OUT_LINUX)/istio-cni
 docker.install-cni: $(ISTIO_OUT_LINUX)/istio-cni-repair
 docker.install-cni: $(ISTIO_OUT_LINUX)/istio-iptables
 docker.install-cni: $(ISTIO_OUT_LINUX)/install-cni
+docker.install-cni: $(ISTIO_OUT_LINUX)/istio-cni-taint
 docker.install-cni: cni/deployments/kubernetes/Dockerfile.install-cni
 	$(DOCKER_RULE)
 
 .PHONY: dockerx dockerx.save
+
+# Can also be linux/arm64, or both with linux/amd64,linux/arm64
+DOCKER_ARCHITECTURES ?= linux/amd64
 
 # Docker has an experimental new build engine, https://github.com/docker/buildx
 # This brings substantial (10x) performance improvements when building Istio
@@ -210,11 +226,11 @@ docker.install-cni: cni/deployments/kubernetes/Dockerfile.install-cni
 # We then override the docker rule and "build" all of these, where building just copies the dependencies
 # We then generate a "bake" file, which defines all of the docker files in the repo
 # Finally, we call `docker buildx bake` to generate the images.
-dockerx: DOCKER_RULE?=mkdir -p $(DOCKERX_BUILD_TOP)/$@ && cp -r $^ $(DOCKERX_BUILD_TOP)/$@ && cd $(DOCKERX_BUILD_TOP)/$@ $(BUILD_PRE)
+dockerx: DOCKER_RULE?=mkdir -p $(DOCKERX_BUILD_TOP)/$@ && cp -rp $^ $(DOCKERX_BUILD_TOP)/$@ && cd $(DOCKERX_BUILD_TOP)/$@ $(BUILD_PRE)
 dockerx: RENAME_TEMPLATE?=mkdir -p $(DOCKERX_BUILD_TOP)/$@ && cp $(ECHO_DOCKER)/$(VM_OS_DOCKERFILE_TEMPLATE) $(DOCKERX_BUILD_TOP)/$@/Dockerfile$(suffix $@)
 dockerx: docker | $(ISTIO_DOCKER_TAR)
 dockerx:
-	HUB=$(HUB) \
+	HUBS="$(HUBS)" \
 		TAG=$(TAG) \
 		PROXY_REPO_SHA=$(PROXY_REPO_SHA) \
 		VERSION=$(VERSION) \
@@ -222,14 +238,57 @@ dockerx:
 		ISTIO_DOCKER_TAR=$(ISTIO_DOCKER_TAR) \
 		BASE_VERSION=$(BASE_VERSION) \
 		DOCKERX_PUSH=$(DOCKERX_PUSH) \
+		DOCKER_ARCHITECTURES=$(DOCKER_ARCHITECTURES) \
 		./tools/buildx-gen.sh $(DOCKERX_BUILD_TOP) $(DOCKER_TARGETS)
-	DOCKER_CLI_EXPERIMENTAL=enabled docker buildx bake -f $(DOCKERX_BUILD_TOP)/docker-bake.hcl $(DOCKER_BUILD_VARIANTS)
+	@# Retry works around https://github.com/docker/buildx/issues/298
+	DOCKER_CLI_EXPERIMENTAL=enabled bin/retry.sh "read: connection reset by peer" docker buildx bake $(BUILDX_BAKE_EXTRA_OPTIONS) -f $(DOCKERX_BUILD_TOP)/docker-bake.hcl $(DOCKER_BUILD_VARIANTS) || \
+		{ docker logs buildx_buildkit_container-builder0; exit 1; }
 
 # Support individual images like `dockerx.pilot`
 dockerx.%:
 	@DOCKER_TARGETS=docker.$* BUILD_ALL=false $(MAKE) --no-print-directory -f Makefile.core.mk dockerx
 
 docker.base: docker/Dockerfile.base
+	$(DOCKER_RULE)
+
+docker.app_sidecar_base_debian_9: BUILD_ARGS=--build-arg VM_IMAGE_NAME=debian --build-arg VM_IMAGE_VERSION=9
+docker.app_sidecar_base_debian_9: VM_OS_DOCKERFILE_TEMPLATE=Dockerfile.app_sidecar_base
+docker.app_sidecar_base_debian_9: pkg/test/echo/docker/Dockerfile.app_sidecar_base
+	$(RENAME_TEMPLATE)
+	$(DOCKER_RULE)
+
+docker.app_sidecar_base_debian_10: BUILD_ARGS=--build-arg VM_IMAGE_NAME=debian --build-arg VM_IMAGE_VERSION=10
+docker.app_sidecar_base_debian_10: VM_OS_DOCKERFILE_TEMPLATE=Dockerfile.app_sidecar_base
+docker.app_sidecar_base_debian_10: pkg/test/echo/docker/Dockerfile.app_sidecar_base
+	$(RENAME_TEMPLATE)
+	$(DOCKER_RULE)
+
+docker.app_sidecar_base_ubuntu_xenial: BUILD_ARGS=--build-arg VM_IMAGE_NAME=ubuntu --build-arg VM_IMAGE_VERSION=xenial
+docker.app_sidecar_base_ubuntu_xenial: VM_OS_DOCKERFILE_TEMPLATE=Dockerfile.app_sidecar_base
+docker.app_sidecar_base_ubuntu_xenial: pkg/test/echo/docker/Dockerfile.app_sidecar_base
+	$(RENAME_TEMPLATE)
+	$(DOCKER_RULE)
+
+docker.app_sidecar_base_ubuntu_bionic: BUILD_ARGS=--build-arg VM_IMAGE_NAME=ubuntu --build-arg VM_IMAGE_VERSION=bionic
+docker.app_sidecar_base_ubuntu_bionic: VM_OS_DOCKERFILE_TEMPLATE=Dockerfile.app_sidecar_base
+docker.app_sidecar_base_ubuntu_bionic: pkg/test/echo/docker/Dockerfile.app_sidecar_base
+	$(RENAME_TEMPLATE)
+	$(DOCKER_RULE)
+
+docker.app_sidecar_base_ubuntu_focal: BUILD_ARGS=--build-arg VM_IMAGE_NAME=ubuntu --build-arg VM_IMAGE_VERSION=focal
+docker.app_sidecar_base_ubuntu_focal: VM_OS_DOCKERFILE_TEMPLATE=Dockerfile.app_sidecar_base
+docker.app_sidecar_base_ubuntu_focal: pkg/test/echo/docker/Dockerfile.app_sidecar_base
+	$(RENAME_TEMPLATE)
+	$(DOCKER_RULE)
+
+docker.app_sidecar_base_centos_8: VM_OS_DOCKERFILE_TEMPLATE=Dockerfile.app_sidecar_base_centos
+docker.app_sidecar_base_centos_8: pkg/test/echo/docker/Dockerfile.app_sidecar_base_centos
+	$(RENAME_TEMPLATE)
+	$(DOCKER_RULE)
+
+docker.app_sidecar_base_centos_7: VM_OS_DOCKERFILE_TEMPLATE=Dockerfile.app_sidecar_base_centos
+docker.app_sidecar_base_centos_7: pkg/test/echo/docker/Dockerfile.app_sidecar_base_centos
+	$(RENAME_TEMPLATE)
 	$(DOCKER_RULE)
 
 docker.distroless: docker/Dockerfile.distroless
@@ -249,7 +308,7 @@ docker.distroless: docker/Dockerfile.distroless
 DOCKER_BUILD_VARIANTS ?= default
 DOCKER_ALL_VARIANTS ?= default distroless
 DEFAULT_DISTRIBUTION=default
-DOCKER_RULE ?= $(foreach VARIANT,$(DOCKER_BUILD_VARIANTS), time (mkdir -p $(DOCKER_BUILD_TOP)/$@ && cp -r $^ $(DOCKER_BUILD_TOP)/$@ && cd $(DOCKER_BUILD_TOP)/$@ $(BUILD_PRE) && docker build $(BUILD_ARGS) --build-arg BASE_DISTRIBUTION=$(VARIANT) -t $(HUB)/$(subst docker.,,$@):$(subst -$(DEFAULT_DISTRIBUTION),,$(TAG)-$(VARIANT)) -f Dockerfile$(suffix $@) . ); )
+DOCKER_RULE ?= $(foreach VARIANT,$(DOCKER_BUILD_VARIANTS), time (mkdir -p $(DOCKER_BUILD_TOP)/$@ && cp -rp $^ $(DOCKER_BUILD_TOP)/$@ && cd $(DOCKER_BUILD_TOP)/$@ $(BUILD_PRE) && docker build $(BUILD_ARGS) --build-arg BASE_DISTRIBUTION=$(VARIANT) -t $(HUB)/$(subst docker.,,$@):$(subst -$(DEFAULT_DISTRIBUTION),,$(TAG)-$(VARIANT)) -f Dockerfile$(suffix $@) . ); )
 RENAME_TEMPLATE ?= mkdir -p $(DOCKER_BUILD_TOP)/$@ && cp $(ECHO_DOCKER)/$(VM_OS_DOCKERFILE_TEMPLATE) $(DOCKER_BUILD_TOP)/$@/Dockerfile$(suffix $@)
 
 # This target will package all docker images used in test and release, without re-building
@@ -275,13 +334,17 @@ $(foreach TGT,$(DOCKER_TARGETS),$(eval DOCKER_TAR_TARGETS+=tar.$(TGT)))
 # this target saves a tar.gz of each docker image to ${ISTIO_OUT_LINUX}/docker/
 dockerx.save: dockerx $(ISTIO_DOCKER_TAR)
 	$(foreach TGT,$(DOCKER_TARGETS), \
-	$(foreach VARIANT,$(DOCKER_BUILD_VARIANTS), time ( \
-		 docker save -o ${ISTIO_DOCKER_TAR}/$(subst docker.,,$(TGT))$(subst -$(DEFAULT_DISTRIBUTION),,-$(VARIANT)).tar $(HUB)/$(subst docker.,,$(TGT)):$(subst -$(DEFAULT_DISTRIBUTION),,$(TAG)-$(VARIANT)) && \
-		 gzip -f ${ISTIO_DOCKER_TAR}/$(subst docker.,,$(TGT))$(subst -$(DEFAULT_DISTRIBUTION),,-$(VARIANT)).tar \
-		   ); \
+	$(foreach VARIANT,$(DOCKER_BUILD_VARIANTS), \
+	   if ! ./tools/skip-image.sh $(TGT) $(VARIANT); then \
+	   time ( \
+		 echo $(TGT)-$(VARIANT); \
+		 docker save $(HUB)/$(subst docker.,,$(TGT)):$(subst -$(DEFAULT_DISTRIBUTION),,$(TAG)-$(VARIANT)) |\
+		 gzip --fast > ${ISTIO_DOCKER_TAR}/$(subst docker.,,$(TGT))$(subst -$(DEFAULT_DISTRIBUTION),,-$(VARIANT)).tar.gz \
+	   ); \
+	   fi; \
 	 ))
 
-docker.save: $(DOCKER_TAR_TARGETS)
+docker.save: dockerx.save
 
 # for each docker.XXX target create a push.docker.XXX target that pushes
 # the local docker image to another hub

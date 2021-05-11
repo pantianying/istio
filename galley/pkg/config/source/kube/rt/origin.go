@@ -31,10 +31,13 @@ type Origin struct {
 	FullName   resource.FullName
 	Version    resource.Version
 	Ref        resource.Reference
+	FieldsMap  map[string]int
 }
 
-var _ resource.Origin = &Origin{}
-var _ resource.Reference = &Position{}
+var (
+	_ resource.Origin    = &Origin{}
+	_ resource.Reference = &Position{}
+)
 
 // FriendlyName implements resource.Origin
 func (o *Origin) FriendlyName() string {
@@ -45,6 +48,10 @@ func (o *Origin) FriendlyName() string {
 		return fmt.Sprintf("%s %s.%s", o.Kind, parts[1], parts[0])
 	}
 	return fmt.Sprintf("%s %s", o.Kind, o.FullName.String())
+}
+
+func (o *Origin) Comparator() string {
+	return o.Kind + "/" + o.FullName.Name.String() + "/" + o.FullName.Namespace.String()
 }
 
 // Namespace implements resource.Origin
@@ -60,6 +67,11 @@ func (o *Origin) Namespace() resource.Namespace {
 // Reference implements resource.Origin
 func (o *Origin) Reference() resource.Reference {
 	return o.Ref
+}
+
+// GetFieldMap implements resource.Origin
+func (o *Origin) FieldMap() map[string]int {
+	return o.FieldsMap
 }
 
 // Position is a representation of the location of a source.

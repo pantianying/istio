@@ -19,6 +19,7 @@ import (
 	prom "github.com/prometheus/common/model"
 
 	"istio.io/istio/pkg/test"
+	"istio.io/istio/pkg/test/framework/components/cluster"
 	"istio.io/istio/pkg/test/framework/resource"
 )
 
@@ -27,14 +28,19 @@ type Instance interface {
 
 	// API Returns the core Prometheus APIs.
 	API() v1.API
+	APIForCluster(cluster cluster.Cluster) v1.API
 
 	// WaitForQuiesce runs the provided query periodically until the result gets stable.
 	WaitForQuiesce(fmt string, args ...interface{}) (prom.Value, error)
 	WaitForQuiesceOrFail(t test.Failer, fmt string, args ...interface{}) prom.Value
+	WaitForQuiesceForCluster(cluster cluster.Cluster, fmt string, args ...interface{}) (prom.Value, error)
+	WaitForQuiesceOrFailForCluster(cluster cluster.Cluster, t test.Failer, fmt string, args ...interface{}) prom.Value
 
 	// WaitForOneOrMore runs the provided query and waits until one (or more for vector) values are available.
 	WaitForOneOrMore(fmt string, args ...interface{}) (prom.Value, error)
 	WaitForOneOrMoreOrFail(t test.Failer, fmt string, args ...interface{}) prom.Value
+	WaitForOneOrMoreForCluster(cluster cluster.Cluster, fmt string, args ...interface{}) (prom.Value, error)
+	WaitForOneOrMoreOrFailForCluster(cluster cluster.Cluster, t test.Failer, fmt string, args ...interface{}) prom.Value
 
 	// Sum all the samples that has the given labels in the given vector value.
 	Sum(val prom.Value, labels map[string]string) (float64, error)
@@ -42,14 +48,11 @@ type Instance interface {
 }
 
 type Config struct {
-	// Cluster to be used in a multicluster environment
-	Cluster resource.Cluster
-
 	// If true, connect to an existing prometheus rather than creating a new one
 	SkipDeploy bool
 }
 
-// New returns a new instance of echo.
+// New returns a new instance of prometheus.
 func New(ctx resource.Context, c Config) (i Instance, err error) {
 	return newKube(ctx, c)
 }

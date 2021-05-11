@@ -16,27 +16,27 @@ package grpcgen_test
 
 import (
 	"context"
-	"log"
-	"os"
 	"testing"
 	"time"
 
-	xdsapi "github.com/envoyproxy/go-control-plane/envoy/api/v2"
-	ads "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v2"
+	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/balancer"
 	"google.golang.org/grpc/resolver"
 	"google.golang.org/grpc/serviceconfig"
 
+	// To setup the env vars needed for grpc-go. Should be loaded before grpc/xds is loaded.
+	_ "istio.io/istio/pilot/test/grpcgen"
+
+	//  To install the xds resolvers and balancers.
+	_ "google.golang.org/grpc/xds"
+
 	networking "istio.io/api/networking/v1alpha3"
-
 	"istio.io/istio/pilot/pkg/model"
-	"istio.io/istio/pilot/pkg/networking/grpcgen"
 	"istio.io/istio/pilot/pkg/xds"
-	v2 "istio.io/istio/pilot/pkg/xds/v2"
-	"istio.io/istio/pkg/config/schema/collections"
 
-	_ "google.golang.org/grpc/xds" // To install the xds resolvers and balancers.
+	"istio.io/istio/pkg/config"
+	"istio.io/istio/pkg/config/schema/collections"
 )
 
 var (
@@ -47,10 +47,7 @@ var (
 )
 
 func TestGRPC(t *testing.T) {
-	ds := xds.NewXDS()
-	ds.DiscoveryServer.Generators["grpc"] = &grpcgen.GrpcConfigGenerator{}
-	epGen := &xds.EdsGenerator{Server: ds.DiscoveryServer}
-	ds.DiscoveryServer.Generators["grpc/"+v2.EndpointType] = epGen
+	ds := xds.NewXDS(make(chan struct{}))
 
 	sd := ds.DiscoveryServer.MemRegistry
 	sd.AddHTTPService("fortio1.fortio.svc.cluster.local", "10.10.10.1", 8081)
@@ -66,8 +63,8 @@ func TestGRPC(t *testing.T) {
 	se := collections.IstioNetworkingV1Alpha3Serviceentries.Resource()
 	store := ds.MemoryConfigStore
 
-	store.Create(model.Config{
-		ConfigMeta: model.ConfigMeta{
+	store.Create(config.Config{
+		Meta: config.Meta{
 			GroupVersionKind: se.GroupVersionKind(),
 			Name:             "fortio",
 			Namespace:        "fortio",
@@ -95,6 +92,7 @@ func TestGRPC(t *testing.T) {
 	})
 
 	env := ds.DiscoveryServer.Env
+	env.Init()
 	if err := env.PushContext.InitContext(env, env.PushContext, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -106,21 +104,22 @@ func TestGRPC(t *testing.T) {
 	}
 	defer ds.GRPCListener.Close()
 
-	os.Setenv("GRPC_XDS_BOOTSTRAP", "testdata/xds_bootstrap.json")
-
 	t.Run("gRPC-resolve", func(t *testing.T) {
 		rb := resolver.Get("xds")
-		ch := make(chan resolver.State)
+		stateCh := &Channel{ch: make(chan interface{}, 1)}
+		errorCh := &Channel{ch: make(chan interface{}, 1)}
 		_, err := rb.Build(resolver.Target{Endpoint: istiodSvcAddr},
-			&testClientConn{ch: ch}, resolver.BuildOptions{})
+			&testClientConn{stateCh: stateCh, errorCh: errorCh}, resolver.BuildOptions{})
 
 		if err != nil {
 			t.Fatal("Failed to resolve XDS ", err)
 		}
 		tm := time.After(10 * time.Second)
 		select {
-		case s := <-ch:
-			log.Println("Got state ", s)
+		case s := <-stateCh.ch:
+			t.Log("Got state ", s)
+		case e := <-errorCh.ch:
+			t.Error("Error in resolve", e)
 		case <-tm:
 			t.Error("Didn't resolve")
 		}
@@ -133,19 +132,21 @@ func TestGRPC(t *testing.T) {
 	})
 
 	t.Run("gRPC-dial", func(t *testing.T) {
-		conn, err := grpc.Dial("xds:///istiod.istio-system.svc.cluster.local:14057", grpc.WithInsecure())
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+		defer cancel()
+		conn, err := grpc.DialContext(ctx, "xds:///istiod.istio-system.svc.cluster.local:14057", grpc.WithInsecure(), grpc.WithBlock())
 		if err != nil {
 			t.Fatal("XDS gRPC", err)
 		}
 
 		defer conn.Close()
-		xds := ads.NewAggregatedDiscoveryServiceClient(conn)
+		xds := discovery.NewAggregatedDiscoveryServiceClient(conn)
 
-		s, err := xds.StreamAggregatedResources(context.Background())
+		s, err := xds.StreamAggregatedResources(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
-		t.Log(s.Send(&xdsapi.DiscoveryRequest{}))
+		t.Log(s.Send(&discovery.DiscoveryRequest{}))
 
 	})
 
@@ -155,20 +156,31 @@ type testLBClientConn struct {
 	balancer.ClientConn
 }
 
+type Channel struct {
+	ch chan interface{}
+}
+
+// Send sends value on the underlying channel.
+func (c *Channel) Send(value interface{}) {
+	c.ch <- value
+}
+
 // From xds_resolver_test
 // testClientConn is a fake implemetation of resolver.ClientConn. All is does
 // is to store the state received from the resolver locally and signal that
 // event through a channel.
 type testClientConn struct {
 	resolver.ClientConn
-	ch chan resolver.State
+	stateCh *Channel
+	errorCh *Channel
 }
 
 func (t *testClientConn) UpdateState(s resolver.State) {
-	t.ch <- s
+	t.stateCh.Send(s)
 }
 
 func (t *testClientConn) ReportError(err error) {
+	t.errorCh.Send(err)
 }
 
 func (t *testClientConn) ParseServiceConfig(jsonSC string) *serviceconfig.ParseResult {

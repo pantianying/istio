@@ -1,3 +1,4 @@
+// +build integ
 //  Copyright Istio Authors
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,9 +17,10 @@ package connection
 
 import (
 	"fmt"
-	"time"
 
 	"istio.io/istio/pkg/test"
+	"istio.io/istio/pkg/test/echo/common/scheme"
+	"istio.io/istio/pkg/test/framework/components/cluster"
 	"istio.io/istio/pkg/test/framework/components/echo"
 	"istio.io/istio/pkg/test/util/retry"
 )
@@ -26,8 +28,10 @@ import (
 // Checker is a test utility for testing the network connectivity between two endpoints.
 type Checker struct {
 	From          echo.Instance
+	DestClusters  cluster.Clusters
 	Options       echo.CallOptions
 	ExpectSuccess bool
+	ExpectMTLS    bool
 }
 
 // Check whether the target endpoint is reachable from the source.
@@ -41,6 +45,22 @@ func (c *Checker) Check() error {
 			return fmt.Errorf("%s to %s:%s using %s: expected success but failed: %v",
 				c.From.Config().Service, c.Options.Target.Config().Service, c.Options.PortName, c.Options.Scheme, err)
 		}
+		// TODO: check why grpc can not reach all clusters
+		// headless will have inconsistent loadbalancing, so we don't check clusters
+		if c.DestClusters.IsMulticluster() && c.Options.Scheme != scheme.GRPC && c.Options.Count > 1 && !c.Options.Target.Config().IsHeadless() {
+			err = results.CheckReachedClusters(c.DestClusters)
+			if err != nil {
+				return err
+			}
+		}
+		if c.ExpectMTLS {
+			err := results.CheckMTLSForHTTP()
+			gotMtls := err == nil
+			if gotMtls != c.ExpectMTLS {
+				return fmt.Errorf("%s to %s:%s using %s: expected mtls=%v, got mtls=%v",
+					c.From.Config().Service, c.Options.Target.Config().Service, c.Options.PortName, c.Options.Scheme, c.ExpectMTLS, gotMtls)
+			}
+		}
 		return nil
 	}
 
@@ -53,7 +73,7 @@ func (c *Checker) Check() error {
 }
 
 func (c *Checker) CheckOrFail(t test.Failer) {
-	if err := retry.UntilSuccess(c.Check, retry.Delay(time.Millisecond*100)); err != nil {
+	if err := retry.UntilSuccess(c.Check, echo.DefaultCallRetryOptions()...); err != nil {
 		t.Fatal(err)
 	}
 }

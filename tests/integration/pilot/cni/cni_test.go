@@ -1,3 +1,4 @@
+// +build integ
 //  Copyright Istio Authors
 //
 //  Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,18 +20,22 @@ import (
 
 	"istio.io/istio/pkg/test/framework"
 	"istio.io/istio/pkg/test/framework/components/echo"
-	"istio.io/istio/pkg/test/framework/components/environment/kube"
 	"istio.io/istio/pkg/test/framework/components/istio"
-	"istio.io/istio/pkg/test/framework/components/namespace"
+	"istio.io/istio/pkg/test/framework/resource"
 	kube2 "istio.io/istio/pkg/test/kube"
+	"istio.io/istio/tests/integration/security/util"
 	"istio.io/istio/tests/integration/security/util/reachability"
+)
+
+var (
+	ist  istio.Instance
+	apps = &util.EchoDeployments{}
 )
 
 func TestMain(m *testing.M) {
 	framework.
 		NewSuite(m).
-		RequireSingleCluster().
-		Setup(istio.Setup(nil, func(cfg *istio.Config) {
+		Setup(istio.Setup(&ist, func(_ resource.Context, cfg *istio.Config) {
 			cfg.ControlPlaneValues = `
 components:
   cni:
@@ -38,6 +43,9 @@ components:
      namespace: kube-system
 `
 		})).
+		Setup(func(t resource.Context) error {
+			return util.SetupApps(t, ist, apps, false)
+		}).
 		Run()
 }
 
@@ -49,42 +57,50 @@ components:
 // - Send HTTP/gRPC requests between apps.
 func TestCNIReachability(t *testing.T) {
 	framework.NewTest(t).
-		Run(func(ctx framework.TestContext) {
-			kenv := ctx.Environment().(*kube.Environment)
-			cluster := kenv.KubeClusters[0]
+		Run(func(t framework.TestContext) {
+			cluster := t.Clusters().Default()
 			_, err := kube2.WaitUntilPodsAreReady(kube2.NewSinglePodFetch(cluster, "kube-system", "k8s-app=istio-cni-node"))
 			if err != nil {
-				ctx.Fatal(err)
+				t.Fatal(err)
 			}
-			rctx := reachability.CreateContext(ctx, false)
-			systemNM := namespace.ClaimSystemNamespaceOrFail(ctx, ctx)
-
+			systemNM := istio.ClaimSystemNamespaceOrFail(t, t)
 			testCases := []reachability.TestCase{
 				{
 					ConfigFile: "global-mtls-on.yaml",
 					Namespace:  systemNM,
 					Include: func(src echo.Instance, opts echo.CallOptions) bool {
 						// Exclude headless naked service, because it is no sidecar
-						if src == rctx.HeadlessNaked || opts.Target == rctx.HeadlessNaked {
+						if apps.HeadlessNaked.Contains(src) || apps.HeadlessNaked.Contains(opts.Target) {
 							return false
 						}
-						// Exclude calls to the headless TCP port.
-						if opts.Target == rctx.Headless && opts.PortName == "tcp" {
+						// Exclude calls to the headless TCP port, or headless multicluster.
+						if apps.Headless.Contains(opts.Target) && (opts.PortName == "tcp" || t.Clusters().IsMulticluster()) {
 							return false
 						}
 						return true
 					},
 					ExpectSuccess: func(src echo.Instance, opts echo.CallOptions) bool {
-						if src == rctx.Naked && opts.Target == rctx.Naked {
+						if apps.Naked.Contains(src) && apps.Naked.Contains(opts.Target) {
 							// naked->naked should always succeed.
 							return true
 						}
 
 						// If one of the two endpoints is naked, expect failure.
-						return src != rctx.Naked && opts.Target != rctx.Naked
+						return !apps.Naked.Contains(src) && !apps.Naked.Contains(opts.Target)
+					},
+					ExpectMTLS: func(src echo.Instance, opts echo.CallOptions) bool {
+						if apps.IsNaked(src) || apps.IsNaked(opts.Target) {
+							// If one of the two endpoints is naked, we don't send mTLS
+							return false
+						}
+						if apps.IsHeadless(opts.Target) && opts.Target == src {
+							// pod calling its own pod IP will not be intercepted
+							return false
+						}
+						return true
 					},
 				},
 			}
-			rctx.Run(testCases)
+			reachability.Run(testCases, t, apps)
 		})
 }

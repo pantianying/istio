@@ -8,6 +8,7 @@ tools/vagrant/.vagrant/
 # Intellij
 *.iml
 .idea/
+.run/
 # Visual Studio Code
 .vscode/
 # Bazel
@@ -18,6 +19,7 @@ tools/vagrant/.vagrant/
 *.pyc
 # Vm setup generated files
 cluster.env
+sidecar.env
 kubedns
 # pilot
 pilot/pkg/kube/config
@@ -51,4 +53,9 @@ vendor
 out/
 etc/
 var/
-.idea/
+# Go compiled tests
+*.test
+# MacOS extended attributes
+._*
+# MacOS Desktop Services Store
+.DS_Store

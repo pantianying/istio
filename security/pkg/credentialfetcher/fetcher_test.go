@@ -18,69 +18,85 @@ import (
 	"testing"
 
 	"istio.io/istio/pkg/security"
+	"istio.io/istio/security/pkg/credentialfetcher/plugin"
 )
 
 func TestNewCredFetcher(t *testing.T) {
 	testCases := map[string]struct {
-		fetcherType   string
-		trustdomain   string
-		jwtPath       string
-		expectedErr   string
-		expectedToken string
-		expectedIdp   string
+		fetcherType      string
+		trustdomain      string
+		jwtPath          string
+		identityProvider string
+		expectedErr      string
+		expectedToken    string
+		expectedIdp      string
 	}{
 		"gce test": {
-			fetcherType:   security.GCE,
-			trustdomain:   "abc.svc.id.goog",
-			jwtPath:       "/var/run/secrets/tokens/istio-token",
-			expectedErr:   "", // No error when ID token auth is enabled.
-			expectedToken: "",
-			expectedIdp:   "GoogleComputeEngine",
+			fetcherType:      security.GCE,
+			trustdomain:      "abc.svc.id.goog",
+			jwtPath:          "/var/run/secrets/tokens/istio-token",
+			identityProvider: security.GCE,
+			expectedErr:      "", // No error when ID token auth is enabled.
+			expectedToken:    "",
+			expectedIdp:      "GoogleComputeEngine",
 		},
 		"mock test": {
-			fetcherType:   security.Mock,
-			trustdomain:   "",
-			jwtPath:       "",
-			expectedErr:   "",
-			expectedToken: "test_token",
-			expectedIdp:   "fakeIDP",
+			fetcherType:      security.Mock,
+			trustdomain:      "",
+			jwtPath:          "",
+			identityProvider: "fakeIDP",
+			expectedErr:      "",
+			expectedToken:    "test_token",
+			expectedIdp:      "fakeIDP",
 		},
 		"invalid test": {
-			fetcherType:   "foo",
-			trustdomain:   "",
-			jwtPath:       "",
-			expectedErr:   "invalid credential fetcher type foo",
-			expectedToken: "",
-			expectedIdp:   "",
+			fetcherType:      "foo",
+			trustdomain:      "",
+			jwtPath:          "",
+			identityProvider: "",
+			expectedErr:      "invalid credential fetcher type foo",
+			expectedToken:    "",
+			expectedIdp:      "",
 		},
 	}
 
+	// Disable token refresh for GCE VM credential fetcher.
+	plugin.SetTokenRotation(false)
 	for id, tc := range testCases {
-		cf, err := NewCredFetcher(
-			tc.fetcherType, tc.trustdomain, tc.jwtPath)
-		if len(tc.expectedErr) > 0 {
-			if err == nil {
-				t.Errorf("%s: succeeded. Error expected: %v", id, err)
-			} else if err.Error() != tc.expectedErr {
-				t.Errorf("%s: incorrect error message: %s VS %s",
-					id, err.Error(), tc.expectedErr)
+		t.Run(id, func(t *testing.T) {
+			t.Parallel()
+			cf, err := NewCredFetcher(
+				tc.fetcherType, tc.trustdomain, tc.jwtPath, tc.identityProvider)
+			if cf != nil {
+				defer cf.Stop()
 			}
-			continue
-		} else if err != nil {
-			t.Errorf("%s: unexpected Error: %v", id, err)
-		}
-		idp := cf.GetIdentityProvider()
-		if idp != tc.expectedIdp {
-			t.Errorf("%s: GetIdentityProvider returned %s, expected %s", id, idp, tc.expectedIdp)
-		}
-		if tc.fetcherType == security.Mock {
-			token, err := cf.GetPlatformCredential()
-			if err != nil {
-				t.Errorf("%s: unexpected error calling GetPlatformCredential: %v", id, err)
+			if len(tc.expectedErr) > 0 {
+				if err == nil {
+					t.Errorf("%s: succeeded. Error expected: %v", id, err)
+				} else if err.Error() != tc.expectedErr {
+					t.Errorf("%s: incorrect error message: %s VS %s",
+						id, err.Error(), tc.expectedErr)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("%s: unexpected Error: %v", id, err)
+				}
+				idp := cf.GetIdentityProvider()
+				if idp != tc.expectedIdp {
+					t.Errorf("%s: GetIdentityProvider returned %s, expected %s", id, idp, tc.expectedIdp)
+				}
+				if tc.fetcherType == security.Mock {
+					token, err := cf.GetPlatformCredential()
+					if err != nil {
+						t.Errorf("%s: unexpected error calling GetPlatformCredential: %v", id, err)
+					}
+					if token != tc.expectedToken {
+						t.Errorf("%s: GetPlatformCredential returned %s, expected %s", id, token, tc.expectedToken)
+					}
+				}
 			}
-			if token != tc.expectedToken {
-				t.Errorf("%s: GetPlatformCredential returned %s, expected %s", id, token, tc.expectedToken)
-			}
-		}
+		})
 	}
+	// Restore token refresh for other tests.
+	plugin.SetTokenRotation(true)
 }

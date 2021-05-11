@@ -15,14 +15,14 @@
 package status
 
 import (
+	"strconv"
 	"strings"
-
-	"istio.io/istio/pilot/pkg/model"
-	"istio.io/istio/pkg/config/schema/collections"
-	"istio.io/istio/pkg/config/schema/resource"
 
 	"gopkg.in/yaml.v2"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	"istio.io/istio/pkg/config"
+	"istio.io/istio/pkg/config/schema/collections"
 )
 
 type DistributionReport struct {
@@ -49,31 +49,33 @@ func ResourceFromString(s string) *Resource {
 			Version:  pieces[1],
 			Resource: pieces[2],
 		},
-		Namespace:       pieces[3],
-		Name:            pieces[4],
-		ResourceVersion: pieces[5],
+		Namespace:  pieces[3],
+		Name:       pieces[4],
+		Generation: pieces[5],
 	}
 }
 
 // TODO: maybe replace with a kubernetes resource identifier, if that's a thing
 type Resource struct {
 	schema.GroupVersionResource
-	Namespace       string
-	Name            string
-	ResourceVersion string
+	Namespace  string
+	Name       string
+	Generation string
 }
 
 func (r Resource) String() string {
-	return strings.Join([]string{r.Group, r.Version, r.Resource, r.Namespace, r.Name, r.ResourceVersion}, "/")
+	return strings.Join([]string{r.Group, r.Version, r.Resource, r.Namespace, r.Name, r.Generation}, "/")
 }
 
 func (r *Resource) ToModelKey() string {
 	// we have a resource here, but model keys use kind.  Use the schema to find the correct kind.
 	found, _ := collections.All.FindByPlural(r.Group, r.Version, r.Resource)
-	return model.Key(found.Resource().Kind(), r.Name, r.Namespace)
+	return config.Key(
+		found.Resource().Group(), found.Resource().Version(), found.Resource().Kind(),
+		r.Name, r.Namespace)
 }
 
-func ResourceFromModelConfig(c model.Config) *Resource {
+func ResourceFromModelConfig(c config.Config) *Resource {
 	gvr := GVKtoGVR(c.GroupVersionKind)
 	if gvr == nil {
 		return nil
@@ -82,11 +84,11 @@ func ResourceFromModelConfig(c model.Config) *Resource {
 		GroupVersionResource: *gvr,
 		Namespace:            c.Namespace,
 		Name:                 c.Name,
-		ResourceVersion:      c.ResourceVersion,
+		Generation:           strconv.FormatInt(c.Generation, 10),
 	}
 }
 
-func GVKtoGVR(in resource.GroupVersionKind) *schema.GroupVersionResource {
+func GVKtoGVR(in config.GroupVersionKind) *schema.GroupVersionResource {
 	found, ok := collections.All.FindByGroupVersionKind(in)
 	if !ok {
 		return nil

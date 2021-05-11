@@ -77,8 +77,8 @@ func profileDumpCmd(rootArgs *rootArgs, pdArgs *profileDumpArgs) *cobra.Command 
 		RunE: func(cmd *cobra.Command, args []string) error {
 			l := clog.NewConsoleLogger(cmd.OutOrStdout(), cmd.ErrOrStderr(), installerScope)
 			return profileDump(args, rootArgs, pdArgs, l)
-		}}
-
+		},
+	}
 }
 
 func prependHeader(yml string) (string, error) {
@@ -132,6 +132,10 @@ func profileDump(args []string, rootArgs *rootArgs, pdArgs *profileDumpArgs, l c
 	}
 
 	y, _, err := manifest.GenerateConfig(pdArgs.inFilenames, setFlags, true, nil, l)
+	if err != nil {
+		return err
+	}
+	y, err = tpath.GetConfigSubtree(y, "spec")
 	if err != nil {
 		return err
 	}

@@ -14,12 +14,15 @@
 package xds_test
 
 import (
+	"fmt"
 	"testing"
 
+	discovery "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v3"
+
 	"istio.io/istio/pilot/pkg/xds"
+	v3 "istio.io/istio/pilot/pkg/xds/v3"
 )
 
-// TestRDS is running RDSv2 tests.
 func TestRDS(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -48,21 +51,25 @@ func TestRDS(t *testing.T) {
 	s := xds.NewFakeDiscoveryServer(t, xds.FakeOptions{})
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			adscon := s.ConnectADS()
-
-			err := sendRDSReq(tt.node, tt.routes, "", "", adscon)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			res, err := adscon.Recv()
-			if err != nil {
-				t.Fatal("Failed to receive RDS", err)
-			}
-
-			if len(res.Resources) == 0 {
-				t.Fatal("No response")
-			}
+			ads := s.ConnectADS().WithType(v3.RouteType).WithID(tt.node)
+			ads.RequestResponseAck(&discovery.DiscoveryRequest{ResourceNames: tt.routes})
 		})
 	}
+}
+
+const (
+	app3Ip    = "10.2.0.1"
+	gatewayIP = "10.3.0.1"
+)
+
+// Common code for the xds testing.
+// The tests in this package use an in-process pilot using mock service registry and
+// envoy.
+
+func sidecarID(ip, deployment string) string { // nolint: unparam
+	return fmt.Sprintf("sidecar~%s~%s-644fc65469-96dza.testns~testns.svc.cluster.local", ip, deployment)
+}
+
+func gatewayID(ip string) string { //nolint: unparam
+	return fmt.Sprintf("router~%s~istio-gateway-644fc65469-96dzt.istio-system~istio-system.svc.cluster.local", ip)
 }
